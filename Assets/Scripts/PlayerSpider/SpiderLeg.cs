@@ -938,6 +938,13 @@ public class SpiderLeg : MonoBehaviour
     {
         // Attach to the closest body
         footHinge.connectedBody = closestBody;
+
+        // Trigger web pulse if attached to a web
+        WebSegment webSegment = closestBody.GetComponent<WebSegment>();
+        if (webSegment != null)
+        {
+            webSegment.TriggerPulse();
+        }
     }
         // Smoothly rotate legSegment2 to the desired angle
 
@@ -1008,13 +1015,14 @@ public class SpiderLeg : MonoBehaviour
             Vector2 point = AP.point;
             float dotProduct = Vector2.Dot(direction, point);
 
-            // Check if the point is within the maximum distance
+            // Check if the point is within the maximum distance and not too close to other feet
             if (
                 Vector2.Distance(GetFootPosition(), point) <= maxDistance
                 && dotProduct > maxDotProduct
                 && Vector2.Distance(head.position, point) < GetCombinedLegLength()
                 && Vector2.Distance(head.position, point) > spiderController.headSafeArea
                 && Vector2.Distance(knee, point) > segmentLength * .9f
+                && !spiderController.IsPointTooCloseToOtherFeet(point, this)
             )
             {
                 maxDotProduct = dotProduct;
@@ -1108,6 +1116,7 @@ public class SpiderLeg : MonoBehaviour
                 && Vector2.Distance(head.position, point) < maxDistance
                 && Vector2.Distance(head.position, point) > spiderController.headSafeArea
                 && Vector2.Distance(knee, point) > segmentLength * .9f
+                && !spiderController.IsPointTooCloseToOtherFeet(point, this)
             )
             {
                 minDistance = distance;
@@ -1222,12 +1231,36 @@ AttachmentPoint bestPoint = new AttachmentPoint();
     // }
     public Vector2 GetFootPosition()
     {
-
-        
-
         Vector2 footPosition =
             (Vector2)legSegment2.position + (Vector2)legSegment2.right * segmentLength;
         return footPosition;
+    }
+
+    public float GetStepUrgency(Vector2 inputDir)
+    {
+        if (!isAttached) return 0f;
+
+        Vector2 footPos = GetFootPosition();
+        float dist = Vector2.Distance(head.position, footPos);
+        float extensionUrgency = dist / GetCombinedLegLength();
+
+        // Directional urgency: Higher if moving away from foot
+        Vector2 toFoot = (footPos - (Vector2)head.position).normalized;
+        float movementUrgency = -Vector2.Dot(inputDir, toFoot);
+
+        // Boost urgency if we are "tripping" (too close to another foot)
+        float proximityUrgency = 0f;
+        foreach (SpiderLeg leg in spiderController.legs)
+        {
+            if (leg == this || !leg.isAttached) continue;
+            float d = Vector2.Distance(footPos, leg.GetFootPosition());
+            if (d < spiderController.footPullTolerance * 3f) // About 1.5 units
+            {
+                proximityUrgency += (1f - (d / (spiderController.footPullTolerance * 3f)));
+            }
+        }
+
+        return extensionUrgency + movementUrgency * 0.5f + proximityUrgency;
     }
     public void SetInputDirection(Vector2 direction)
     {

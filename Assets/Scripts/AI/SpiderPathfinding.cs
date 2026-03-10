@@ -66,7 +66,7 @@ public List<Vector2> CalculatePath(Vector2 startPosition, Vector2 targetPosition
         }
     }
 
-    Debug.Log("Pathfinding failed to find a path");
+    // Debug.Log("Pathfinding failed to find a path");
     return new List<Vector2>(); // Return an empty path if no valid path is found
 }
 

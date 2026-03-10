@@ -54,6 +54,9 @@ public class SpiderWebShooter : MonoBehaviour
                 WebSegment previousWebSegment = previousSegment.GetComponent<WebSegment>();
                 previousWebSegment.hinge.connectedBody = webSegmentGO.GetComponent<Rigidbody2D>();
                 webSegment.hinge2.connectedBody = previousWebSegment.gameObject.GetComponent<Rigidbody2D>();
+                
+                previousWebSegment.RegisterNeighbor(webSegment);
+                webSegment.RegisterNeighbor(previousWebSegment);
             }
 
             previousSegment = webSegmentGO;

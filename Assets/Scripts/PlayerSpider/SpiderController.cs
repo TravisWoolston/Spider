@@ -52,6 +52,8 @@ public class SpiderController : MonoBehaviour
     public float footPullTolerance = .5f;
     public bool footCheck = false;
     private bool closeFar = false;
+    public bool urgencyGait = true;
+    public float urgencyThreshold = 1.0f;
     private bool leftRight;
     private Rigidbody2D headRigidbody;
     public float headRotationSpeed = 5f;
@@ -69,6 +71,7 @@ public class SpiderController : MonoBehaviour
     public float centiRestingHeight;
             public PolygonCollider2D legRef;
             public int aIFollowDistance;
+            private float footSpacing = 2f;
     void Start()
     {
         // foreach (SpiderLeg leg in legs)
@@ -160,6 +163,8 @@ public class SpiderController : MonoBehaviour
                 if(gameObject.tag == "Centipede"){
                     CentipedeGaitWalk();
                 }
+                else if (urgencyGait)
+                    UrgencyGait();
                 else if (gaitPattern)
                     GaitWalk();
                 else
@@ -272,7 +277,7 @@ void CentipedeGaitWalk()
 {
     SpiderLeg currentLeg = legs[legIndex];
 
-    if (GetDetachedCount() < maxDetached)
+    if (GetDetachedCount() < (float)maxDetached)
     {
         currentLeg.Detach();
     }
@@ -283,6 +288,47 @@ void CentipedeGaitWalk()
     {
         legIndex = 0;
     }
+}
+
+void UrgencyGait()
+{
+    if (GetDetachedCount() >= (float)maxDetached) return;
+
+    SpiderLeg bestLeg = null;
+    float maxUrgency = urgencyThreshold;
+
+    foreach (SpiderLeg leg in legs)
+    {
+        if (!leg.isAttached) continue;
+
+        // Side balance: Don't detach too many on one side. 
+        if (leg.isLeftSide && GetDetachedLCount() >= maxDetached / 2) continue;
+        if (!leg.isLeftSide && GetDetachedRCount() >= maxDetached / 2) continue;
+
+        float urgency = leg.GetStepUrgency(inputDirection);
+        if (urgency > maxUrgency)
+        {
+            maxUrgency = urgency;
+            bestLeg = leg;
+        }
+    }
+
+    if (bestLeg != null)
+    {
+        bestLeg.Detach();
+    }
+}
+
+public bool IsPointTooCloseToOtherFeet(Vector2 point, SpiderLeg excludeLeg)
+{
+    foreach (SpiderLeg leg in legs)
+    {
+        if (leg == excludeLeg || !leg.isAttached) continue;
+        // Avoid placing feet too close to each other to prevent "tripping"
+        if (Vector2.Distance(point, leg.GetFootPosition()) < footSpacing)
+            return true;
+    }
+    return false;
 }
 // Helper function to check if the leg has an attachment point in the direction of input
 bool HasAttachmentPointInInputDirection(SpiderLeg leg)

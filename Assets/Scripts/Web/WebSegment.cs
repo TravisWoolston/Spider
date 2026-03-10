@@ -1,4 +1,7 @@
 using UnityEngine;
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine.Rendering.Universal;
 
 public class WebSegment : MonoBehaviour
 {
@@ -12,10 +15,117 @@ public class WebSegment : MonoBehaviour
     public int stringId = -1;
     public float segmentLength;
 
+    private SpriteRenderer spriteRenderer;
+    private Color originalColor;
+    private static int currentPulseId = 0;
+    private int lastPulseId = -1;
+    public List<WebSegment> neighbors = new List<WebSegment>();
+
+    private Light2D pulseLight;
+    public float maxLightIntensity = 50.0f; // Increased for better visibility
+    public float lightOuterRadius = 1000.0f;  // Increased radius
+    public Color pulseColor = Color.white; // Neutral white light
+
     void Start()
     {
         rb = GetComponent<Rigidbody2D>();
         // hinge = GetComponent<HingeJoint2D>();
+        spriteRenderer = GetComponent<SpriteRenderer>();
+        if (spriteRenderer != null)
+        {
+            originalColor = spriteRenderer.color;
+        }
+
+        pulseLight = GetComponent<Light2D>();
+        if (pulseLight == null)
+        {
+            pulseLight = gameObject.AddComponent<Light2D>();
+            pulseLight.lightType = Light2D.LightType.Point;
+        }
+
+        if (pulseLight != null)
+        {
+            pulseLight.intensity = 0;
+            pulseLight.pointLightOuterRadius = lightOuterRadius;
+            pulseLight.color = pulseColor;
+            pulseLight.shadowsEnabled = false; // Usually better for performance and visibility here
+        }
+    }
+
+    public void RegisterNeighbor(WebSegment other)
+    {
+        if (other != null && !neighbors.Contains(other))
+        {
+            neighbors.Add(other);
+        }
+    }
+
+    public void TriggerPulse()
+    {
+        Debug.Log($"[WebSense] Pulse triggered on segment {gameObject.name} (String ID: {stringId})");
+        currentPulseId++;
+        Pulse(1.0f, currentPulseId);
+    }
+
+    public void Pulse(float strength, int pulseId)
+    {
+        if (lastPulseId == pulseId || strength <= 0.01f)
+        {
+            return;
+        }
+        lastPulseId = pulseId;
+
+        StopAllCoroutines();
+        StartCoroutine(PulseRoutine(strength, pulseId));
+    }
+
+    private IEnumerator PulseRoutine(float strength, int pulseId)
+    {
+        float duration = 0.6f; // Slightly longer for better visibility
+        float elapsed = 0;
+        
+        // Propagate pulse to neighbors after a small delay
+        float propagationDelay = 0.04f;
+        // Start showing local pulse immediately
+        
+        while (elapsed < duration)
+        {
+            elapsed += Time.deltaTime;
+            float t = elapsed / duration;
+            if (spriteRenderer != null)
+            {
+                spriteRenderer.color = Color.Lerp(pulseColor, originalColor, t);
+            }
+
+            if (pulseLight != null)
+            {
+                pulseLight.intensity = Mathf.Lerp(maxLightIntensity * strength, 0, t);
+            }
+
+            if (elapsed >= propagationDelay && propagationDelay > 0)
+            {
+                // Propagate once
+                foreach (var neighbor in neighbors)
+                {
+                    if (neighbor != null)
+                    {
+                        neighbor.Pulse(strength * 0.96f, pulseId); // Slower decay
+                    }
+                }
+                propagationDelay = -1f; 
+            }
+            yield return null;
+        }
+        
+        if (spriteRenderer != null)
+        {
+            spriteRenderer.color = originalColor;
+        }
+
+        if (pulseLight != null)
+        {
+            pulseLight.intensity = 0;
+        }
     }
 
     void Update()
@@ -98,6 +208,13 @@ public void CheckContact()
         hinge2.enabled = true;
         firstSegment = false;
         isAttached = true;
+
+        WebSegment other = closestHit.collider.GetComponent<WebSegment>();
+        if (other != null)
+        {
+            RegisterNeighbor(other);
+            other.RegisterNeighbor(this);
+        }
     }
 }
 
@@ -181,6 +298,14 @@ public void CheckContact()
 
             isAttached = true;
             Debug.Log("Web segment attached to: " + hit.collider.name); // Debugging info
+
+            WebSegment other = hit.collider.GetComponent<WebSegment>();
+            if (other != null)
+            {
+                RegisterNeighbor(other);
+                other.RegisterNeighbor(this);
+            }
+
             return true; // Stop creating more segments
         }
         RaycastHit2D[] webHits = Physics2D.RaycastAll(
@@ -212,6 +337,14 @@ public void CheckContact()
                     + " "
                     + webHit.collider.GetComponent<WebSegment>().stringId
             ); // Debugging info
+
+            WebSegment other = webHit.collider.GetComponent<WebSegment>();
+            if (other != null)
+            {
+                RegisterNeighbor(other);
+                other.RegisterNeighbor(this);
+            }
+
             return true;
         }
         }

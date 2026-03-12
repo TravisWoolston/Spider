@@ -10,10 +10,58 @@ public class WebSegment : MonoBehaviour
     public HingeJoint2D hinge;
     public HingeJoint2D hinge2;
     public bool firstSegment = false;
-    public float overlapRadius = .2f;
+    [HideInInspector] public float overlapRadius = .2f;
     public LayerMask defaultLayer;
     public int stringId = -1;
-    public float segmentLength;
+    [HideInInspector] public float segmentLength;
+    [Header("Safety")]
+    public Transform ignoreTransform;
+    public float ignoreRadius = 0f;
+
+    public void ForceAttachStart(Collider2D col, Vector2 point)
+    {
+        if (hinge2 == null) return;
+        var targetRb = col.GetComponentInParent<Rigidbody2D>(); // Parent in case of child colliders
+        hinge2.connectedBody = targetRb;
+        hinge2.connectedAnchor = targetRb != null ? (Vector2)targetRb.transform.InverseTransformPoint(point) : point;
+        hinge2.enabled = true;
+        isAttached = true;
+
+        if (col.gameObject.layer == LayerMask.NameToLayer("Web"))
+        {
+            WebSegment other = col.GetComponent<WebSegment>();
+            if (other != null) {
+                RegisterNeighbor(other);
+                other.RegisterNeighbor(this);
+            }
+        }
+    }
+
+    public void ForceAttachEnd(Collider2D col, Vector2 point)
+    {
+        if (hinge == null) return;
+        var targetRb = col.GetComponentInParent<Rigidbody2D>(); // Parent in case of child colliders
+        hinge.connectedBody = targetRb;
+        hinge.connectedAnchor = targetRb != null ? (Vector2)targetRb.transform.InverseTransformPoint(point) : point;
+        hinge.enabled = true;
+        isAttached = true;
+
+        if (col.gameObject.layer == LayerMask.NameToLayer("Web"))
+        {
+            WebSegment other = col.GetComponent<WebSegment>();
+            if (other != null) {
+                RegisterNeighbor(other);
+                other.RegisterNeighbor(this);
+            }
+        }
+    }
+
+    public void CheckCurrentContact()
+    {
+        // For final release, we use the end hinge
+        RaycastHit2D hit = Physics2D.Raycast(transform.position, Vector2.zero, 0.5f, defaultLayer | LayerMask.GetMask("Web"));
+        if (hit.collider != null) ForceAttachEnd(hit.collider, hit.point);
+    }
 
     private SpriteRenderer spriteRenderer;
     private Color originalColor;
@@ -170,6 +218,10 @@ public void CheckContact()
     {
         if (hit.collider != null)
         {
+            // Safety Check: Don't attach to things too close to the spider's head during firing
+            if (ignoreTransform != null && Vector2.Distance(hit.point, ignoreTransform.position) < ignoreRadius)
+                continue;
+
             bool isValidHit = false;
 
             // Check if hit is on the "Web" layer and not part of the same string
@@ -289,6 +341,9 @@ public void CheckContact()
 
         if (hit.collider != null)
         {
+            if (ignoreTransform != null && Vector2.Distance(hit.point, ignoreTransform.position) < ignoreRadius)
+                return false;
+
             // Attach the segment to the hit object
             hinge.connectedBody = hit.collider.GetComponent<Rigidbody2D>();
             // hinge.anchor = new Vector2(0, -segmentLength / 2);
@@ -319,6 +374,9 @@ public void CheckContact()
         
         if (webHit.collider != null)
         {
+            if (ignoreTransform != null && Vector2.Distance(webHit.point, ignoreTransform.position) < ignoreRadius)
+                continue;
+
             if (webHit.collider.GetComponent<WebSegment>().stringId == stringId)
             {
                 continue;

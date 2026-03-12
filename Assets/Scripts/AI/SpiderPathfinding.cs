@@ -1,119 +1,138 @@
 using System.Collections.Generic;
 using UnityEngine;
 
+/// <summary>
+/// Optimized A* Pathfinding for the SpiderControllerIK.
+/// Uses GlobalAttachmentManager to navigate between web strands and surfaces.
+/// </summary>
 public class SpiderPathfinding : MonoBehaviour
 {
-    public SpiderController spiderController;
+    private SpiderControllerIK spiderController;
 
-    // Heuristic function to estimate the distance to the target
-    private float Heuristic(Vector2 from, Vector2 to)
+    [Header("A* Settings")]
+    [Tooltip("Maximum nodes to evaluate before giving up on a path.")]
+    public int maxIterations = 500;
+
+    private void Awake()
     {
-        return Vector2.Distance(from, to);
+        // Auto-detect the IK controller on the same GameObject
+        spiderController = GetComponent<SpiderControllerIK>();
     }
 
-    // Simplified A* pathfinding tailored for the spider's movement using global attachment points
-public int maxIterations = 500; // Set a reasonable limit
-public List<Vector2> CalculatePath(Vector2 startPosition, Vector2 targetPosition)
-{
-    List<Node> openList = new List<Node>();
-    HashSet<Node> closedList = new HashSet<Node>();
-
-    Node startNode = new Node(startPosition, null, 0, Heuristic(startPosition, targetPosition));
-    openList.Add(startNode);
-
-    int iterations = 0;
-    while (openList.Count > 0)
+    /// <summary>
+    /// Calculates a path of attachment points from start to target.
+    /// </summary>
+    public List<Vector2> CalculatePath(Vector2 startPosition, Vector2 targetPosition)
     {
-        iterations++;
-        if (iterations > maxIterations) // Stop if we've exceeded the maximum iterations
+        if (spiderController == null)
         {
-            Debug.Log("Pathfinding terminated due to exceeding max iterations");
-            return new List<Vector2>(); // Return empty path
+            Debug.LogError("[SpiderPathfinding] No SpiderControllerIK found on " + gameObject.name);
+            return new List<Vector2>();
         }
 
-        // Sort and get the node with the lowest F score
-        openList.Sort((nodeA, nodeB) => nodeA.F.CompareTo(nodeB.F));
-        Node currentNode = openList[0];
+        // 1. Initialize A* structures
+        List<Node> openList = new List<Node>();
+        HashSet<Vector2> closedSet = new HashSet<Vector2>();
 
-        // If we are close enough to the target, return the path
-        if (Vector2.Distance(currentNode.Position, targetPosition) <= spiderController.maxLegExtension)
+        // We use a slight reach buffer to ensure the spider can actually make the strides
+        float reach = spiderController.legExtensionMax * 0.9f;
+
+        Node startNode = new Node(startPosition, null, 0, Vector2.Distance(startPosition, targetPosition));
+        openList.Add(startNode);
+
+        int iterations = 0;
+        while (openList.Count > 0)
         {
-            return ReconstructPath(currentNode);
+            iterations++;
+            if (iterations > maxIterations) break;
+
+            // 2. Efficiently pick the node with the lowest F cost
+            // Optimization: Single pass min search is faster than Sort() for typical path lengths
+            int bestIdx = 0;
+            for (int i = 1; i < openList.Count; i++)
+            {
+                if (openList[i].F < openList[bestIdx].F) bestIdx = i;
+            }
+
+            Node currentNode = openList[bestIdx];
+
+            // 3. Goal Check
+            if (Vector2.Distance(currentNode.Position, targetPosition) <= reach)
+            {
+                List<Vector2> path = ReconstructPath(currentNode);
+                path.Add(targetPosition); 
+                return path;
+            }
+
+            openList.RemoveAt(bestIdx);
+            closedSet.Add(currentNode.Position);
+
+            // 4. Neighbor Expansion using GlobalAttachmentManager
+            List<GlobalAttachmentPoint> pointsNear = GlobalAttachmentManager.GetPointsInRange(currentNode.Position, reach);
+            
+            foreach (var point in pointsNear)
+            {
+                if (closedSet.Contains(point.point)) continue;
+
+                float gCost = currentNode.G + Vector2.Distance(currentNode.Position, point.point);
+                float hCost = Vector2.Distance(point.point, targetPosition);
+
+                // Check if we already have this point in open list
+                Node existingNode = null;
+                foreach(var n in openList)
+                {
+                    if (n.Position == point.point)
+                    {
+                        existingNode = n;
+                        break;
+                    }
+                }
+
+                if (existingNode != null)
+                {
+                    if (gCost < existingNode.G)
+                    {
+                        existingNode.Parent = currentNode;
+                        existingNode.G = gCost;
+                    }
+                }
+                else
+                {
+                    openList.Add(new Node(point.point, currentNode, gCost, hCost));
+                }
+            }
         }
 
-        openList.Remove(currentNode);
-        closedList.Add(currentNode);
-
-        List<GlobalAttachmentPoint> neighbors = GlobalAttachmentManager.GetPointsInRange(currentNode.Position, spiderController.maxLegExtension);
-        foreach (var neighbor in neighbors)
-        {
-            Node neighborNode = new Node(neighbor.point, currentNode, 0, Heuristic(neighbor.point, targetPosition));
-
-            if (closedList.Contains(neighborNode))
-                continue;
-
-            float tentativeG = currentNode.G + Vector2.Distance(currentNode.Position, neighborNode.Position);
-
-            if (openList.Contains(neighborNode) && tentativeG >= neighborNode.G)
-                continue;
-
-            neighborNode.Parent = currentNode;
-            neighborNode.G = tentativeG;
-            neighborNode.H = Heuristic(neighborNode.Position, targetPosition);
-
-            if (!openList.Contains(neighborNode))
-                openList.Add(neighborNode);
-        }
+        return new List<Vector2>();
     }
 
-    // Debug.Log("Pathfinding failed to find a path");
-    return new List<Vector2>(); // Return an empty path if no valid path is found
-}
-
-
-    // Reconstruct the path from the end node to the start node
     private List<Vector2> ReconstructPath(Node endNode)
     {
         List<Vector2> path = new List<Vector2>();
-        Node currentNode = endNode;
-
-        while (currentNode != null)
+        Node curr = endNode;
+        while (curr != null)
         {
-            path.Add(currentNode.Position);
-            currentNode = currentNode.Parent;
+            path.Add(curr.Position);
+            curr = curr.Parent;
         }
-
         path.Reverse();
         return path;
     }
 
-    // Node class representing each point in the path
     private class Node
     {
         public Vector2 Position;
         public Node Parent;
-        public float G;  // Cost from start node
-        public float H;  // Heuristic cost to target node
-        public float F => G + H;  // Total cost
+        public float G;
+        public float H;
+        public float F => G + H;
 
-        public Node(Vector2 position, Node parent, float g, float h)
+        public Node(Vector2 pos, Node parent, float g, float h)
         {
-            Position = position;
+            Position = pos;
             Parent = parent;
             G = g;
             H = h;
-        }
-
-        public override bool Equals(object obj)
-        {
-            if (obj == null || GetType() != obj.GetType()) return false;
-            Node other = (Node)obj;
-            return Position.Equals(other.Position);
-        }
-
-        public override int GetHashCode()
-        {
-            return Position.GetHashCode();
         }
     }
 }

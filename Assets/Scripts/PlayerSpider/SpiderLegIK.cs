@@ -35,11 +35,21 @@ public class SpiderLegIK : MonoBehaviour
     [HideInInspector] public Vector2 currentFootPos;
     [HideInInspector] public Vector2 targetFootPos;
     [HideInInspector] public bool    isStepping = false;
-    [HideInInspector] public bool    isPlanted  = true;
-    [HideInInspector] public float   plantedTimer = 999f;  // time since last step landed
+    [HideInInspector] public float   stepProgress = 0f;
+    [HideInInspector] public bool    isPlanted  = false;
+    [HideInInspector] public float   plantedTimer = 0f;
+
+    private Vector2 stepStartPos;
+    private Vector2 currentStepTarget;
+    private Vector2 currentStepNormal;
+    private Vector2 lerpedStepTarget;
+    private Vector2 lerpedStepNormal;
+    
+    private Transform plantedTransform;
+    private Vector2 plantedLocalPos;
+    private Rigidbody2D plantedRb;
 
     private SpiderControllerIK controller;
-    private Vector2 stepStartPos;
     private bool useLimbSolver;
 
     // ── Joint anchor data (read from HingeJoint2Ds at startup) ──
@@ -78,7 +88,8 @@ public class SpiderLegIK : MonoBehaviour
         // Seed foot position
         currentFootPos = foot != null ? (Vector2)foot.position : (Vector2)transform.position;
         targetFootPos = currentFootPos;
-
+        isPlanted = true; // Start planted
+        
         if (useLimbSolver && ikTarget != null)
             ikTarget.position = (Vector3)currentFootPos;
     }
@@ -283,39 +294,92 @@ public class SpiderLegIK : MonoBehaviour
     //  Stepping
     // ───────────────────────────────────────────────────────────
 
-    public void StepTo(Vector2 worldTarget, Vector2 normal)
+    public void StepTo(Vector2 worldTarget, Vector2 normal, Collider2D col = null)
     {
         if (isStepping) return;
-        StartCoroutine(StepCoroutine(worldTarget, normal));
+        
+        // Physical Kick: Apply a tiny force to the object we step on for a realistic look
+        if (col != null)
+        {
+            var targetRb = col.GetComponentInParent<Rigidbody2D>();
+            if (targetRb != null && targetRb != controller.headRb)
+            {
+                // Apply a small push at the step point
+                targetRb.AddForceAtPosition(-normal * 0.5f, worldTarget, ForceMode2D.Impulse);
+            }
+        }
+
+        currentStepTarget = worldTarget;
+        currentStepNormal = normal;
+        lerpedStepTarget = worldTarget;
+        lerpedStepNormal = normal;
+        
+        // Clear old plant data
+        plantedTransform = col != null ? col.transform : null;
+        if (plantedTransform != null)
+        {
+            plantedRb = col.GetComponentInParent<Rigidbody2D>();
+            plantedLocalPos = plantedTransform.InverseTransformPoint(worldTarget);
+        }
+        else
+        {
+            plantedRb = null;
+        }
+
+        StartCoroutine(StepCoroutine());
     }
 
-    IEnumerator StepCoroutine(Vector2 target, Vector2 normal)
+    public void UpdateStepTarget(Vector2 worldTarget, Vector2 normal)
+    {
+        if (!isStepping) return;
+        currentStepTarget = worldTarget;
+        currentStepNormal = normal;
+    }
+
+    IEnumerator StepCoroutine()
     {
         isStepping = true;
         isPlanted  = false;
         stepStartPos = currentFootPos;
 
-        float distance = Vector2.Distance(stepStartPos, target);
-        float duration = distance / controller.stepSpeed;
-        if (duration < 0.01f) duration = 0.01f; // Prevent division by zero or instant steps
-
-        Vector2 mid     = (stepStartPos + target) * 0.5f;
-        Vector2 control = mid + normal * controller.stepHeight;
-
         float t = 0f;
         while (t < 1f)
         {
-            t += Time.deltaTime / duration;
+            // Smoothly transition the target/normal in mid-air
+            lerpedStepTarget = Vector2.Lerp(lerpedStepTarget, currentStepTarget, Time.deltaTime * 15f);
+            lerpedStepNormal = Vector2.Lerp(lerpedStepNormal, currentStepNormal, Time.deltaTime * 15f);
+
+            // Distance-Based Progress: Moves 't' based on a constant world speed (Units per Second)
+            // This ensures consistent velocity even if the target is moving.
+            float currentTotalDist = Vector2.Distance(stepStartPos, lerpedStepTarget);
+            if (currentTotalDist > 0.01f)
+                t += (controller.stepSpeed * Time.deltaTime) / currentTotalDist;
+            else
+                t = 1f;
+
             if (t > 1f) t = 1f;
-            currentFootPos = Bezier(stepStartPos, control, target, t);
+            stepProgress = t;
+
+            Vector2 mid     = (stepStartPos + lerpedStepTarget) * 0.5f;
+            Vector2 control = mid + lerpedStepNormal * controller.stepHeight;
+            
+            currentFootPos = Bezier(stepStartPos, control, lerpedStepTarget, t);
             yield return null;
         }
 
-        currentFootPos = target;
-        targetFootPos  = target;
+        currentFootPos = currentStepTarget;
+        targetFootPos  = currentStepTarget;
         isStepping = false;
+        stepProgress = 0f;
         isPlanted  = true;
-        plantedTimer = 0f;  // reset cooldown
+        plantedTimer = 0f;
+
+        // Final snap to target object if it moved during the step
+        if (plantedTransform != null)
+        {
+            plantedLocalPos = plantedTransform.InverseTransformPoint(currentStepTarget);
+            currentFootPos = plantedTransform.TransformPoint(plantedLocalPos);
+        }
     }
 
     static Vector2 Bezier(Vector2 a, Vector2 b, Vector2 c, float t)
@@ -340,6 +404,18 @@ public class SpiderLegIK : MonoBehaviour
     {
         if (thigh == null) return transform.position;
         return thigh.TransformPoint(elbowOnThigh);
+    }
+
+    void Update()
+    {
+        // ───────────────────────────────────────────────────────────
+        //  Follow the surface (for moving platforms/webs)
+        // ───────────────────────────────────────────────────────────
+        if (isPlanted && !isStepping && plantedTransform != null)
+        {
+            currentFootPos = plantedTransform.TransformPoint(plantedLocalPos);
+            targetFootPos = currentFootPos;
+        }
     }
 
     // ───────────────────────────────────────────────────────────

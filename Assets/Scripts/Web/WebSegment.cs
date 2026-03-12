@@ -62,7 +62,7 @@ public class WebSegment : MonoBehaviour
 
     public void TriggerPulse()
     {
-        Debug.Log($"[WebSense] Pulse triggered on segment {gameObject.name} (String ID: {stringId})");
+        // Debug.Log($"[WebSense] Pulse triggered on segment {gameObject.name} (String ID: {stringId})");
         currentPulseId++;
         Pulse(1.0f, currentPulseId);
     }

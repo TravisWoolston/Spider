@@ -27,9 +27,6 @@ public class SpiderLegIK : MonoBehaviour
     [Header("LimbSolver Mode")]
     public Transform ikTarget;
 
-    [Header("Stepping")]
-    public float stepDuration = 0.2f;
-    public float stepHeight   = 2f;
 
     [Header("Editor")]
     public bool editorPreview = false;
@@ -298,13 +295,17 @@ public class SpiderLegIK : MonoBehaviour
         isPlanted  = false;
         stepStartPos = currentFootPos;
 
+        float distance = Vector2.Distance(stepStartPos, target);
+        float duration = distance / controller.stepSpeed;
+        if (duration < 0.01f) duration = 0.01f; // Prevent division by zero or instant steps
+
         Vector2 mid     = (stepStartPos + target) * 0.5f;
-        Vector2 control = mid + normal * stepHeight;
+        Vector2 control = mid + normal * controller.stepHeight;
 
         float t = 0f;
         while (t < 1f)
         {
-            t += Time.deltaTime / stepDuration;
+            t += Time.deltaTime / duration;
             if (t > 1f) t = 1f;
             currentFootPos = Bezier(stepStartPos, control, target, t);
             yield return null;
@@ -333,6 +334,12 @@ public class SpiderLegIK : MonoBehaviour
             ? (Vector2)bodyTransform.TransformPoint(bodyAnchor)
             : (Vector2)thigh.TransformPoint(shoulderOnThigh);
         return Vector2.Distance(shoulder, currentFootPos);
+    }
+
+    public Vector2 GetKneePosition()
+    {
+        if (thigh == null) return transform.position;
+        return thigh.TransformPoint(elbowOnThigh);
     }
 
     // ───────────────────────────────────────────────────────────

@@ -12,9 +12,12 @@ public class GridCameraController : MonoBehaviour
     public float transitionModStore;
     public bool disableTransition;
      public Vector3 targetPosition; // Target position for the camera
-     public float transitionSpeed = 2f;
-     public float camZoom = .1f;
-         void Start()
+    public float transitionSpeed = 2f;
+    public float camZoom = .1f;
+    public bool followSpider = false;
+    public float followSmoothing = 5f;
+
+    void Start()
     {
         cam = GetComponentInChildren<Camera>();
 
@@ -31,32 +34,50 @@ public class GridCameraController : MonoBehaviour
 
     void LateUpdate()
     {
-        if(Input.GetKey(KeyCode.Keypad1)){
-            cam.orthographicSize-=camZoom;
-        }
-          if(Input.GetKey(KeyCode.Keypad2)){
-            cam.orthographicSize+=camZoom;
-        }
-        if (spiderHead != null && cam != null)
+        if (Input.GetKey(KeyCode.Keypad1))
         {
-            
+            cam.orthographicSize -= camZoom;
+        }
+        if (Input.GetKey(KeyCode.Keypad2))
+        {
+            cam.orthographicSize += camZoom;
+        }
+
+        if (spiderHead == null || cam == null) return;
+
+        if (followSpider)
+        {
+            // Smoothly follow the spider's head directly
+            Vector3 goal = new Vector3(spiderHead.position.x, spiderHead.position.y, transform.position.z) + offset;
+            transform.position = Vector3.Lerp(transform.position, goal, Time.deltaTime * followSmoothing);
+            targetPosition = transform.position; // Keep targetPosition synced for when toggle is turned off
+        }
+        else
+        {
+            // Existing Grid-based movement logic
             Vector3 viewportPoint = cam.WorldToViewportPoint(spiderHead.position);
-            if(disableTransition){
+            if (disableTransition)
+            {
                 transitionMod = 0;
-            } else {
+            }
+            else
+            {
                 transitionMod = transitionModStore;
             }
-            if(Mathf.Floor(transform.position.x) == Mathf.Floor(targetPosition.x) && viewportPoint.x > 0 + transitionModStore +.15f && viewportPoint.x < 1 - transitionModStore -.15f){
+
+            if (Mathf.Floor(transform.position.x) == Mathf.Floor(targetPosition.x) && viewportPoint.x > 0 + transitionModStore + .15f && viewportPoint.x < 1 - transitionModStore - .15f)
+            {
                 disableTransition = false;
                 transitionMod = transitionModStore;
             }
-            if(Mathf.Floor(transform.position.x) == Mathf.Floor(targetPosition.x) && (viewportPoint.x < 0 || viewportPoint.x > 1)){
+
+            if (Mathf.Floor(transform.position.x) == Mathf.Floor(targetPosition.x) && (viewportPoint.x < 0 || viewportPoint.x > 1))
+            {
                 disableTransition = false;
                 transitionMod = transitionModStore;
                 targetPosition.y = spiderHead.position.y;
-
             }
-            // Check if the spider's head is out of the camera view
+
             if ((viewportPoint.x < 0 + transitionMod || viewportPoint.x > 1 - transitionMod) && !disableTransition)
             {
                 float moveAmountX = cam.orthographicSize * cam.aspect * (camMoveMod - transitionMod);
@@ -68,7 +89,6 @@ public class GridCameraController : MonoBehaviour
                 {
                     targetPosition += new Vector3(moveAmountX, 0, 0);
                 }
-                
                 disableTransition = true;
             }
 
@@ -84,11 +104,10 @@ public class GridCameraController : MonoBehaviour
                     targetPosition += new Vector3(0, moveAmountY, 0);
                 }
             }
-            
-             transform.position = Vector3.Lerp(transform.position, targetPosition, Time.deltaTime * transitionSpeed);
-            //  Debug.Log("viewport " + viewportPoint);
-            //  Debug.Log("spider y " + spiderHead.position.y);
+
+            transform.position = Vector3.Lerp(transform.position, targetPosition, Time.deltaTime * transitionSpeed);
         }
-       disableTransition = false;
+
+        disableTransition = false;
     }
 }

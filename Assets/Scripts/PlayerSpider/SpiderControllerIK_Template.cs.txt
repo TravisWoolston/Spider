@@ -1,0 +1,77 @@
+using UnityEngine;
+using System.Collections.Generic;
+
+public class SpiderControllerIK : MonoBehaviour
+{
+    public SpiderLegIK[] legs;
+    public float movementSpeed = 5f;
+    public float stepThreshold = 2f;
+    public float bodyHeight = 3f;
+    public float bodySmoothing = 5f;
+    public Vector2 inputDirection;
+
+    private Vector2 targetBodyPos;
+    private float targetBodyRot;
+
+    void Update()
+    {
+        GetInput();
+        UpdateGait();
+        SolveBodyPose();
+    }
+
+    void GetInput()
+    {
+        inputDirection = new Vector2(Input.GetAxis("Horizontal"), Input.GetAxis("Vertical")).normalized;
+    }
+
+    void UpdateGait()
+    {
+        // Simple logic: if a leg is too far from its ideal position, it steps
+        foreach (var leg in legs)
+        {
+            if (leg.isStepping) continue;
+
+            Vector2 idealFootPos = (Vector2)transform.position + leg.idealLocalOffset;
+            float dist = Vector2.Distance(leg.currentFootPos, idealFootPos);
+
+            if (dist > stepThreshold)
+            {
+                // Trigger step to a new target in the direction of movement
+                Vector2 newTarget = idealFootPos + inputDirection * stepThreshold;
+                leg.StepTo(newTarget);
+                break; // One leg at a time for gait stability
+            }
+        }
+    }
+
+    void SolveBodyPose()
+    {
+        // "Body reliant on legs": The body's position is the average of where the legs can support it
+        Vector2 consensusPos = Vector2.zero;
+        float consensusRot = 0f;
+        int plantedCount = 0;
+
+        foreach (var leg in legs)
+        {
+            if (leg.isPlanted)
+            {
+                // The hip 'wants' to be at (Foot + HeightOffset)
+                consensusPos += (leg.currentFootPos + (Vector2.up * bodyHeight));
+                plantedCount++;
+            }
+        }
+
+        if (plantedCount > 0)
+        {
+            targetBodyPos = consensusPos / plantedCount;
+            // Smoothly move the body to the consensus position
+            transform.position = Vector2.Lerp(transform.position, targetBodyPos, Time.deltaTime * bodySmoothing);
+        }
+        else
+        {
+            // Fall! No legs on ground.
+            transform.position += Vector2.down * 9.81f * Time.deltaTime;
+        }
+    }
+}

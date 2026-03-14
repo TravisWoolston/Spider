@@ -300,14 +300,14 @@ public class SpiderLegIK : MonoBehaviour
     {
         if (isStepping) return;
         
-        // Physical Kick: Apply a tiny force to the object we step on for a realistic look
+        // Physical Kick: Apply a force to the object we step on for a realistic look
         if (col != null)
         {
             var targetRb = col.GetComponentInParent<Rigidbody2D>();
             if (targetRb != null && targetRb != controller.headRb)
             {
-                // Apply a small push at the step point
-                targetRb.AddForceAtPosition(-normal * 0.5f, worldTarget, ForceMode2D.Impulse);
+                // Apply a significant push at the step point
+                targetRb.AddForceAtPosition(-normal * (controller.headRb.mass * 1.5f), worldTarget, ForceMode2D.Impulse);
             }
         }
 
@@ -348,12 +348,17 @@ public class SpiderLegIK : MonoBehaviour
         float t = 0f;
         while (t < 1f)
         {
+            // If the target object is moving (like a sagging web), update our world target to follow it
+            if (plantedTransform != null)
+            {
+                currentStepTarget = plantedTransform.TransformPoint(plantedLocalPos);
+            }
+
             // Smoothly transition the target/normal in mid-air
             lerpedStepTarget = Vector2.Lerp(lerpedStepTarget, currentStepTarget, Time.deltaTime * 15f);
             lerpedStepNormal = Vector2.Lerp(lerpedStepNormal, currentStepNormal, Time.deltaTime * 15f);
 
-            // Distance-Based Progress: Moves 't' based on a constant world speed (Units per Second)
-            // This ensures consistent velocity even if the target is moving.
+            // Distance-Based Progress
             float currentTotalDist = Vector2.Distance(stepStartPos, lerpedStepTarget);
             if (currentTotalDist > 0.01f)
                 t += (controller.stepSpeed * Time.deltaTime) / currentTotalDist;
@@ -409,16 +414,24 @@ public class SpiderLegIK : MonoBehaviour
         return thigh.TransformPoint(elbowOnThigh);
     }
 
+    public void SyncToSurface()
+    {
+        if (plantedTransform != null)
+        {
+            // Always update the step target if we have one, so mid-air steps track moving webs
+            currentStepTarget = plantedTransform.TransformPoint(plantedLocalPos);
+
+            if (isPlanted && !isStepping)
+            {
+                currentFootPos = currentStepTarget;
+                targetFootPos = currentFootPos;
+            }
+        }
+    }
+
     void Update()
     {
-        // ───────────────────────────────────────────────────────────
-        //  Follow the surface (for moving platforms/webs)
-        // ───────────────────────────────────────────────────────────
-        if (isPlanted && !isStepping && plantedTransform != null)
-        {
-            currentFootPos = plantedTransform.TransformPoint(plantedLocalPos);
-            targetFootPos = currentFootPos;
-        }
+        SyncToSurface();
     }
 
     // ───────────────────────────────────────────────────────────

@@ -221,8 +221,8 @@ public class SpiderWebShooter : MonoBehaviour
         if (segmentRb != null)
         {
             segmentRb.mass = 0.1f; // Mass was 50! Reducing this stops the explosion forces
-            segmentRb.linearDamping = 5f;
-            segmentRb.angularDamping = 5f;
+            segmentRb.linearDamping = 2f;
+            segmentRb.angularDamping = 2f;
             segmentRb.gravityScale = 0.5f; // Reduce sag tension
             segmentRb.collisionDetectionMode = CollisionDetectionMode2D.Continuous;
         }

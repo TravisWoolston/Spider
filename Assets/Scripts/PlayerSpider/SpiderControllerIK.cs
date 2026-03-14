@@ -42,6 +42,10 @@ public class SpiderControllerIK : MonoBehaviour
     public int   rayCount      = 100;
     public float sightDistance  = 15f;
 
+    [Header("Web Physics")]
+    public float spiderWeightMult = 1.0f; // Factor of spider's mass applied to web segments
+    public float webWeightScale => spiderWeightMult; // Deprecated shim
+
     [Header("Debug")]
     public bool showDebug = true;
 
@@ -674,6 +678,9 @@ public class SpiderControllerIK : MonoBehaviour
     {
         if (restingFootOffsets == null || legs == null) return;
 
+        // 0. Synchronize all legs to their moving surfaces (webs) 
+        foreach (var leg in legs) leg.SyncToSurface();
+
         int planted = 0;
         Vector2 avgFootPos = Vector2.zero;
         Vector2 normalSum  = Vector2.zero;
@@ -821,6 +828,28 @@ public class SpiderControllerIK : MonoBehaviour
         // 5. Rotate the Body to match the surface
         headT.rotation = Quaternion.Slerp(headT.rotation, stableRot, Time.fixedDeltaTime * rotationSpeed);
         headRb.freezeRotation = true;
+
+        // 6. Apply Weight to Webs
+        // This transfers the spider's physical presence onto the strands so they sag and react.
+        if (spiderWeightMult > 0.01f && planted > 0)
+        {
+            // Boosted force to actually move the strands against damping
+            float weightPerLeg = (headRb.mass * Mathf.Abs(Physics2D.gravity.y) * spiderWeightMult * 2.0f) / planted;
+            Vector2 weightDir = Physics2D.gravity.normalized;
+            
+            foreach (var leg in legs)
+            {
+                if (leg.isPlanted && leg.plantedTransform != null)
+                {
+                    // Use the plantedRb cached in the leg if possible, or fetch it
+                    Rigidbody2D targetRb = leg.plantedTransform.GetComponentInParent<Rigidbody2D>();
+                    if (targetRb != null && targetRb != headRb)
+                    {
+                        targetRb.AddForceAtPosition(weightDir * weightPerLeg, leg.currentFootPos, ForceMode2D.Force);
+                    }
+                }
+            }
+        }
     }
 
     // ───────────────────────────────────────────────────────────

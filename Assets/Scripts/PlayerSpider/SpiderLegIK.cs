@@ -38,6 +38,7 @@ public class SpiderLegIK : MonoBehaviour
     [HideInInspector] public float   stepProgress = 0f;
     [HideInInspector] public bool    isPlanted  = false;
     [HideInInspector] public float   plantedTimer = 0f;
+    [HideInInspector] public Vector2 plantedNormal;
 
     private Vector2 stepStartPos;
     private Vector2 currentStepTarget;
@@ -45,7 +46,7 @@ public class SpiderLegIK : MonoBehaviour
     private Vector2 lerpedStepTarget;
     private Vector2 lerpedStepNormal;
     
-    private Transform plantedTransform;
+    public  Transform plantedTransform;
     private Vector2 plantedLocalPos;
     private Rigidbody2D plantedRb;
 
@@ -89,6 +90,7 @@ public class SpiderLegIK : MonoBehaviour
         currentFootPos = foot != null ? (Vector2)foot.position : (Vector2)transform.position;
         targetFootPos = currentFootPos;
         isPlanted = true; // Start planted
+        plantedNormal = Vector2.up; // Default
         
         if (useLimbSolver && ikTarget != null)
             ikTarget.position = (Vector3)currentFootPos;
@@ -311,6 +313,7 @@ public class SpiderLegIK : MonoBehaviour
 
         currentStepTarget = worldTarget;
         currentStepNormal = normal;
+        plantedNormal = normal;
         lerpedStepTarget = worldTarget;
         lerpedStepNormal = normal;
         

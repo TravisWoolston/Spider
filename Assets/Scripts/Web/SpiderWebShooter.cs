@@ -67,9 +67,6 @@ public class SpiderWebShooter : MonoBehaviour
         isHoldingWeb = true;
         currentSegmentCount = 0;
         lastSegment = null; // Clean slate
-        activeWebString = new GameObject("LiveWebString_" + stringId);
-        activeWebString.AddComponent<WebStringRenderer>();
-        
         Vector2 mousePos = Camera.main.ScreenToWorldPoint(Input.mousePosition);
         Vector2 startPos = (Vector2)webStartPoint.position;
         Vector2 direction = (mousePos - startPos).normalized;
@@ -93,6 +90,20 @@ public class SpiderWebShooter : MonoBehaviour
         }
         
         Vector2 endPoint = hit.collider != null ? hit.point : startPos + (direction * (maxShootRange * 0.5f));
+
+        // --- Hierarchy Merging ---
+        // If we hit an existing web, make this new strand a child of that web's container
+        if (hit.collider != null && hit.collider.gameObject.layer == LayerMask.NameToLayer("Web"))
+        {
+            activeWebString = new GameObject("Branch_" + stringId);
+            activeWebString.transform.SetParent(hit.collider.transform.parent);
+        }
+        else
+        {
+            activeWebString = new GameObject("LiveWebString_" + stringId);
+        }
+        activeWebString.AddComponent<WebStringRenderer>();
+
         float totalDist = Vector2.Distance(startPos, endPoint);
         int numSegments = Mathf.Clamp(Mathf.CeilToInt(totalDist / segmentLength), 1, maxWebSegments);
 
@@ -257,6 +268,24 @@ public class SpiderWebShooter : MonoBehaviour
     public void FinalizeExtrusion(Collider2D finalAnchor = null, Vector2 finalPoint = default)
     {
         if (!isHoldingWeb) return;
+
+        // --- Hierarchy Merging (Finalization) ---
+        // If we are currently a root string but attaching to a web, merge into that web's folder
+        if (activeWebString != null && activeWebString.name.StartsWith("LiveWebString"))
+        {
+            Collider2D target = finalAnchor;
+            if (target == null && lastSegment != null)
+            {
+                RaycastHit2D hit = Physics2D.Raycast(lastSegment.transform.position, Vector2.zero, 0.5f, LayerMask.GetMask("Web"));
+                target = hit.collider;
+            }
+
+            if (target != null && target.gameObject.layer == LayerMask.NameToLayer("Web"))
+            {
+                activeWebString.name = "Branch_" + stringId;
+                activeWebString.transform.SetParent(target.transform.parent);
+            }
+        }
         
         // Physically lock the last segment at the released point
         if (lastSegment != null)

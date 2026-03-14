@@ -49,6 +49,7 @@ public class SpiderControllerIK : MonoBehaviour
     private float targetBodyHeight = 0f;
     [HideInInspector] public Vector2 inputDirection;
     private Vector2 smoothedInput;
+    private Vector2 currentSurfaceNormal = Vector2.up;
 
     private List<AttachmentPoint> leftPoints  = new();
     private List<AttachmentPoint> rightPoints = new();
@@ -137,6 +138,7 @@ public class SpiderControllerIK : MonoBehaviour
             {
                 leg.currentFootPos = hit.point;
                 leg.targetFootPos  = hit.point;
+                leg.plantedNormal  = hit.normal;
                 leg.isPlanted = true;
             }
         }
@@ -214,10 +216,8 @@ public class SpiderControllerIK : MonoBehaviour
         // 2. Automated & Stick-Based dodging
         if (smoothedInput.sqrMagnitude > 0.1f)
         {
-            // If pushing stick "away" from surface, hunker down (Dodging)
-            // If pushing stick "towards" surface, rise up
-            Vector2 surfaceNormal = (targetBodyHeight > 0) ? (Vector2)headT.up : -(Vector2)headT.up;
-            float dodgeBias = Vector2.Dot(smoothedInput, (Vector2)headT.up);
+            // Use the average surface normal for orientation-agnostic dodging
+            float dodgeBias = Vector2.Dot(smoothedInput, currentSurfaceNormal);
             
             // Auto Reach: If moving into empty space, hunker
             int pointsAhead = 0;
@@ -251,22 +251,25 @@ public class SpiderControllerIK : MonoBehaviour
 
         Vector2 origin = headRb != null ? headRb.position : (Vector2)headT.position;
 
+        int webLayer = LayerMask.NameToLayer("Web");
         float step = 360f / rayCount;
         for (int i = 0; i < rayCount; i++)
         {
             float rad = i * step * Mathf.Deg2Rad;
             Vector2 dir = new Vector2(Mathf.Cos(rad), Mathf.Sin(rad));
 
-            // Use RaycastAll so we can "See through" nearby spiders-web
+            // Use RaycastAll so we can "See through" multiple strands of web
             RaycastHit2D[] hits = Physics2D.RaycastAll(origin, dir, sightDistance, attachableLayers);
+            
+            // RAYCASTALL IS NOT ORDERED: We must sort by distance to handle obstructions correctly
+            System.Array.Sort(hits, (a, b) => a.distance.CompareTo(b.distance));
+
             foreach (var hit in hits)
             {
                 if (hit.collider == null) continue;
 
                 float dist = Vector2.Distance(hit.point, origin);
-                // Walking: Only ignore webs that are RIGHT next to the head (spinneret)
-                // Use a small constant like 1f or headSafeArea for walking
-                if (hit.collider.gameObject.layer == LayerMask.NameToLayer("Web") && dist < 1.0f)
+                if (hit.collider.gameObject.layer == webLayer && dist < 1.0f)
                     continue;
 
                 float localX = headT.InverseTransformPoint(hit.point).x;
@@ -275,8 +278,10 @@ public class SpiderControllerIK : MonoBehaviour
                 if (localX < 0) leftPoints.Add(ap);
                 else            rightPoints.Add(ap);
                 
-                // Once we find the first valid surface (usually the floor or a far web), stop looking in this direction
-                break;
+                // Stop evaluating this ray ONLY if we hit a solid surface.
+                // If it's a web, keep looking for more web or ground behind it.
+                if (hit.collider.gameObject.layer != webLayer)
+                    break;
             }
         }
 
@@ -291,19 +296,50 @@ public class SpiderControllerIK : MonoBehaviour
                 float rad = i * kneeStep * Mathf.Deg2Rad;
                 Vector2 dir = new Vector2(Mathf.Cos(rad), Mathf.Sin(rad));
                 RaycastHit2D[] hits = Physics2D.RaycastAll(kneeOrigin, dir, sightDistance * 0.5f, attachableLayers);
+                System.Array.Sort(hits, (a, b) => a.distance.CompareTo(b.distance));
+
                 foreach (var hit in hits)
                 {
                     if (hit.collider == null) continue;
-                    float dist = Vector2.Distance(hit.point, origin);
-                    if (hit.collider.gameObject.layer == LayerMask.NameToLayer("Web") && dist < 1.0f)
+                    float distFromHead = Vector2.Distance(hit.point, origin);
+                    
+                    // Allow webs even if they are very close to the head (overlap prevention)
+                    bool isWeb = hit.collider.gameObject.layer == webLayer;
+                    if (!isWeb && distFromHead < 1.0f)
                         continue;
 
                     float localX = headT.InverseTransformPoint(hit.point).x;
                     var ap = new AttachmentPoint(hit.point, hit.normal, hit.collider);
                     if (localX < 0) leftPoints.Add(ap);
                     else            rightPoints.Add(ap);
-                    break;
+                    
                 }
+            }
+        }
+
+        // --- Volume-based Web Detection (The "Safety Net") ---
+        // This finds webs that radial rays might miss because they are too thin or aligned with the ray
+        Collider2D[] webs = Physics2D.OverlapCircleAll(origin, sightDistance, LayerMask.GetMask("Web"));
+        foreach (var col in webs)
+        {
+            Vector2 forward = headT.up;
+            Vector2 right = headT.right;
+
+            // Sample points along the strand to give the gait logic options for strides
+            float[] samples = { -0.5f, 0f, 0.5f, 1.0f }; 
+            foreach (float f in samples)
+            {
+                Vector2 sampleOrig = origin + forward * f * minStride * 2.5f;
+                
+                // Left side point on this strand
+                Vector2 leftTarget = sampleOrig - right * footSpacing * 2f;
+                Vector2 pL = col.ClosestPoint(leftTarget);
+                leftPoints.Add(new AttachmentPoint(pL, (origin - pL).normalized, col));
+
+                // Right side point on this strand
+                Vector2 rightTarget = sampleOrig + right * footSpacing * 2f;
+                Vector2 pR = col.ClosestPoint(rightTarget);
+                rightPoints.Add(new AttachmentPoint(pR, (origin - pR).normalized, col));
             }
         }
     }
@@ -317,8 +353,22 @@ public class SpiderControllerIK : MonoBehaviour
     {
         if (legs == null) return;
         restingFootOffsets = new Vector2[legs.Length];
+        float avgY = 0;
         for (int i = 0; i < legs.Length; i++)
-            restingFootOffsets[i] = headT.InverseTransformPoint(legs[i].currentFootPos);
+        {
+            Vector2 local = headT.InverseTransformPoint(legs[i].currentFootPos);
+            avgY += local.y;
+            restingFootOffsets[i] = new Vector2(local.x, 0); // Flatten Y to remove hardcoded height
+        }
+        
+        // Move the design height from offsets into the dynamic bodyHeight variable
+        if (legs.Length > 0)
+        {
+            avgY /= legs.Length;
+            defaultBodyHeight = -avgY;
+            targetBodyHeight = defaultBodyHeight;
+            bodyHeight = defaultBodyHeight;
+        }
     }
 
     // ───────────────────────────────────────────────────────────
@@ -474,6 +524,7 @@ public class SpiderControllerIK : MonoBehaviour
 
     AttachmentPoint GetBestPoint(SpiderLegIK leg)
     {
+        int webLayer = LayerMask.NameToLayer("Web");
         int idx = System.Array.IndexOf(legs, leg);
         List<AttachmentPoint> pool = leg.isPhysicallyRight ? rightPoints : leftPoints;
         if (pool.Count == 0) return new AttachmentPoint { isValid = false };
@@ -497,15 +548,20 @@ public class SpiderControllerIK : MonoBehaviour
         foreach (var ap in pool)
         {
             float distFromHead = Vector2.Distance(headPos, ap.point);
+            bool isWeb = ap.collider.gameObject.layer == webLayer;
+
             if (distFromHead > legExtensionMax || distFromHead < legExtensionMin) continue;
-            // Basic safety: Don't step inside the head radius (keeping this small for actual stepping)
-            if (distFromHead < headSafeArea) continue; 
+            
+            // On webs, allow stepping much closer to the head to ensure we don't "miss" the strand segment under us
+            float effectSafeArea = isWeb ? headSafeArea * 0.5f : headSafeArea;
+            if (distFromHead < effectSafeArea) continue; 
+            
             if (IsPointTooCloseToOtherFeet(ap.point, leg)) continue;
 
             // Significant stride check ONLY for the start of a step
             if (!leg.isStepping && inputDirection.sqrMagnitude > 0.01f)
             {
-                if (Vector2.Distance(leg.currentFootPos, ap.point) < minStride)
+                if (Vector2.Distance(leg.currentFootPos, ap.point) < minStride * (isWeb ? 0.5f : 1.0f))
                     continue;
             }
 
@@ -515,9 +571,10 @@ public class SpiderControllerIK : MonoBehaviour
             // 1. Distance to predictive goal
             score -= Vector2.Distance(idealPos, ap.point) * 2.0f;
             
-            // 2. Center-line avoidance (HARD FILTER)
+            // 2. Center-line avoidance (RELAXED ON WEBS)
             float sideBias = leg.isPhysicallyRight ? 1f : -1f;
-            if (localX * sideBias < 0.1f) continue; 
+            float sideMargin = isWeb ? -0.5f : 0.1f; // Allow reaching across the center-line on webs
+            if (localX * sideBias < sideMargin) continue; 
 
             // 4. Directional Progressive Check (HARD FILTER)
             if (smoothedInput.sqrMagnitude > 0.05f)
@@ -547,11 +604,10 @@ public class SpiderControllerIK : MonoBehaviour
                 score += Vector2.Dot(toPointRel.normalized, inputNorm) * 8f;
             }
 
-            // 5. Normal Alignment
-            float localY = headT.InverseTransformPoint(ap.point).y;
+            // 5. Directional/Orientation Scores
+            // Removed localY penalty and normal-up bias to avoid 'upward distinction'
             score += Mathf.Abs(localX) * 2f;
-            score -= Mathf.Abs(localY) * 1.5f;
-            score += Vector2.Dot(ap.normal, headT.up) * 3f;
+            // score += Vector2.Dot(ap.normal, headT.up) * 3f; 
 
             if (score > bestScore) { bestScore = score; best = ap; }
         }
@@ -564,22 +620,28 @@ public class SpiderControllerIK : MonoBehaviour
         Vector2 inputNorm = smoothedInput.normalized;
         bool hasInput = smoothedInput.sqrMagnitude > 0.05f;
 
+        int webLayer = LayerMask.NameToLayer("Web");
         foreach (var ap in pool)
         {
             float distFromHead = Vector2.Distance(headRb.position, ap.point);
+            bool isWeb = ap.collider.gameObject.layer == webLayer;
+
             if (distFromHead > legExtensionMax || distFromHead < legExtensionMin) continue;
-            if (distFromHead < headSafeArea) continue; // Keep stepping safety separate from web safety
+            
+            float effectSafeArea = isWeb ? headSafeArea * 0.5f : headSafeArea;
+            if (distFromHead < effectSafeArea) continue; 
 
             // Longitudinal check (side detection)
             float localX = headT.InverseTransformPoint(ap.point).x;
             float sideBias = leg.isPhysicallyRight ? 1f : -1f;
-            if (localX * sideBias < 0.1f) continue;
+            float sideMargin = isWeb ? -0.5f : 0.1f;
+            if (localX * sideBias < sideMargin) continue;
 
             if (IsPointTooCloseToOtherFeet(ap.point, leg)) continue;
 
             // Must be a significant step
             float stepDist = Vector2.Distance(leg.currentFootPos, ap.point);
-            if (stepDist < minStride) continue;
+            if (stepDist < minStride * (isWeb ? 0.5f : 1.0f)) continue;
 
             // If moving, must provide forward progress relative to SMOOTHED input
             if (hasInput)
@@ -622,10 +684,7 @@ public class SpiderControllerIK : MonoBehaviour
             if (!leg.isPlanted) continue;
             
             avgFootPos   += leg.currentFootPos;
-            
-            // Sample normal at each foot for a stable average surface orientation
-            RaycastHit2D hit = Physics2D.Raycast(leg.currentFootPos + (Vector2)headT.up * 0.2f, -headT.up, 1f, attachableLayers);
-            normalSum += (hit.collider != null) ? hit.normal : (Vector2)headT.up;
+            normalSum    += leg.plantedNormal;
             
             planted++;
         }
@@ -636,10 +695,84 @@ public class SpiderControllerIK : MonoBehaviour
             return;
         }
 
-        Vector2 avgNormal = (normalSum / planted).normalized;
+        // Calculate Groundedness (How many legs are on solid surfaces vs webs)
+        int webLayer = LayerMask.NameToLayer("Web");
+        int groundPlanted = 0;
+        foreach (var leg in legs)
+        {
+            if (leg.isPlanted && leg.plantedTransform != null && leg.plantedTransform.gameObject.layer != webLayer)
+                groundPlanted++;
+        }
+        // groundFactor is 1.0 on solid floor, ~0.0 on webs.
+        float groundFactor = (float)groundPlanted / Mathf.Max(1, planted);
+
+        // Multi-leg stability on strands: 
+        // If we have many legs on the SAME strand, we can move more confidently.
+        int maxOnSameStrand = 0;
+        var counts = new System.Collections.Generic.Dictionary<Collider2D, int>();
+        foreach (var leg in legs)
+        {
+            if (leg.isPlanted && leg.plantedTransform != null)
+            {
+                Collider2D col = leg.plantedTransform.GetComponent<Collider2D>();
+                if (col != null)
+                {
+                    counts[col] = counts.ContainsKey(col) ? counts[col] + 1 : 1;
+                    if (counts[col] > maxOnSameStrand) maxOnSameStrand = counts[col];
+                }
+            }
+        }
+        float strandFactor = (float)maxOnSameStrand / Mathf.Max(1, planted);
+
+        Vector2 avgNormal;
+        if (normalSum.sqrMagnitude < 0.01f)
+            avgNormal = (Vector2)headT.up;
+        else
+            avgNormal = normalSum.normalized;
+
+        // 2. Determine "Stable Frame" (Shortest-path rotation for a vertically symmetrical spider)
+        // Derived from foot locations to ensure the body "squares up" to its sprawl.
+        float num = 0, den = 0;
+        Vector2 center = (avgFootPos / planted);
+        for (int i = 0; i < legs.Length; i++)
+        {
+            if (!legs[i].isPlanted) continue;
+            Vector2 relPos = (Vector2)legs[i].currentFootPos - center;
+            float localX = restingFootOffsets[i].x;
+            num += localX * relPos.y;
+            den += localX * relPos.x;
+        }
+
+        float targetAngle;
+        if (Mathf.Abs(num) < 0.0001f && Mathf.Abs(den) < 0.0001f)
+        {
+            targetAngle = Mathf.Atan2(avgNormal.y, avgNormal.x) * Mathf.Rad2Deg - 90f;
+        }
+        else
+        {
+            targetAngle = Mathf.Atan2(num, den) * Mathf.Rad2Deg;
+            
+            // 180-degree symmetry management: pick shortest path 
+            // but bias towards surface normal if on solid ground.
+            float altAngle = targetAngle + 180f;
+            float currentAngle = headT.rotation.eulerAngles.z;
+            
+            float diff1 = Mathf.Abs(Mathf.DeltaAngle(currentAngle, targetAngle));
+            float diff2 = Mathf.Abs(Mathf.DeltaAngle(currentAngle, altAngle));
+
+            if (groundFactor > 0.3f)
+            {
+                float normAngle = Mathf.Atan2(avgNormal.y, avgNormal.x) * Mathf.Rad2Deg - 90f;
+                if (Mathf.Abs(Mathf.DeltaAngle(normAngle, altAngle)) < Mathf.Abs(Mathf.DeltaAngle(normAngle, targetAngle)))
+                    targetAngle = altAngle;
+            }
+            else if (diff2 < diff1)
+            {
+                targetAngle = altAngle;
+            }
+        }
         
-        // 2. Determine "Stable Frame" (Ideal rotation based on surface)
-        float targetAngle = Mathf.Atan2(avgNormal.y, avgNormal.x) * Mathf.Rad2Deg - 90f;
+        currentSurfaceNormal = avgNormal;
         Quaternion stableRot = Quaternion.Euler(0, 0, targetAngle);
 
         // 3. Calculate target position using the stable frame to transform offsets.
@@ -652,20 +785,32 @@ public class SpiderControllerIK : MonoBehaviour
             posSum += (legs[i].currentFootPos - worldOffset);
         }
         
-        Vector2 targetPos = (posSum / planted) + avgNormal * bodyHeight;
+        Vector2 targetPos = (posSum / planted);
+
+        
+        // Scale body height and lead: 
+        // We always want SOME height and lead to facilitate gait, even on webs.
+        // If on ground OR a single continuous strand, we move more confidently (higher and faster)
+        float confidence = Mathf.Max(groundFactor, strandFactor * 0.7f);
+        
+        float effectHeight = bodyHeight * Mathf.Lerp(0.2f, 1.0f, confidence);
+        float effectLead   = bodyLead   * Mathf.Lerp(0.4f, 1.0f, confidence);
+        
+        targetPos += avgNormal * effectHeight;
 
         // 4. Input Lead: Have the head subtly lead the feet to drive the gait
         if (smoothedInput.sqrMagnitude > 0.01f)
         {
             // Project the lead onto the surface plane for stability
-            targetPos += (Vector2)smoothedInput * bodyLead;
+            targetPos += (Vector2)smoothedInput * effectLead;
         }
 
         // 5. Move the Body
         Vector2 toTarget = targetPos - headRb.position;
         
-        // Stationary Stability: Be much more "lazy" when stopped to prevent bobbing
-        float currentSmoothing = (inputDirection.sqrMagnitude > 0.01f) ? bodySmoothing : bodySmoothing * 0.2f;
+        // Stationary Stability & Surface-based damping
+        float surfaceSmoothing = Mathf.Lerp(bodySmoothing * 0.7f, bodySmoothing, groundFactor);
+        float currentSmoothing = (inputDirection.sqrMagnitude > 0.01f) ? surfaceSmoothing : surfaceSmoothing * 0.2f;
         
         Vector2 gravityCancel = -Physics2D.gravity * headRb.gravityScale;
         
@@ -744,7 +889,7 @@ public class SpiderControllerIK : MonoBehaviour
                 isManipulating = false;
 
                 // Lock the foot to the surface/web we just stuck to
-                manipulatorLeg.StepTo(manipulatorLeg.currentFootPos, headT.up, col);
+                manipulatorLeg.StepTo(manipulatorLeg.currentFootPos, currentSurfaceNormal, col);
                 manipulatorLeg = null;
             }
             

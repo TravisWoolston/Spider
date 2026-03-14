@@ -31,6 +31,12 @@ public class WebSegment : MonoBehaviour
         {
             WebSegment other = col.GetComponent<WebSegment>();
             if (other != null) {
+                // Snap to nearest pivot of the target web segment
+                Vector2 localPoint = other.transform.InverseTransformPoint(point);
+                float dStart = Vector2.Distance(localPoint, other.hinge2.anchor);
+                float dEnd = Vector2.Distance(localPoint, other.hinge.anchor);
+                hinge2.connectedAnchor = (dStart < dEnd) ? other.hinge2.anchor : other.hinge.anchor;
+
                 RegisterNeighbor(other);
                 other.RegisterNeighbor(this);
             }
@@ -50,6 +56,12 @@ public class WebSegment : MonoBehaviour
         {
             WebSegment other = col.GetComponent<WebSegment>();
             if (other != null) {
+                // Snap to nearest pivot of the target web segment
+                Vector2 localPoint = other.transform.InverseTransformPoint(point);
+                float dStart = Vector2.Distance(localPoint, other.hinge2.anchor);
+                float dEnd = Vector2.Distance(localPoint, other.hinge.anchor);
+                hinge.connectedAnchor = (dStart < dEnd) ? other.hinge2.anchor : other.hinge.anchor;
+
                 RegisterNeighbor(other);
                 other.RegisterNeighbor(this);
             }
@@ -255,18 +267,28 @@ public void CheckContact()
     // If a valid closest hit was found, attach hinge2 to it
     if (closestHit.collider != null)
     {
-        hinge2.connectedBody = closestHit.collider.GetComponent<Rigidbody2D>();
-        hinge2.connectedAnchor = closestHit.collider.transform.InverseTransformPoint(closestHit.point);
-        hinge2.enabled = true;
-        firstSegment = false;
-        isAttached = true;
-
+        hinge2.connectedBody = closestHit.collider.GetComponentInParent<Rigidbody2D>();
+        
         WebSegment other = closestHit.collider.GetComponent<WebSegment>();
         if (other != null)
         {
+            // Snap to nearest pivot of the target web segment
+            Vector2 localPoint = other.transform.InverseTransformPoint(closestHit.point);
+            float dStart = Vector2.Distance(localPoint, other.hinge2.anchor);
+            float dEnd = Vector2.Distance(localPoint, other.hinge.anchor);
+            hinge2.connectedAnchor = (dStart < dEnd) ? other.hinge2.anchor : other.hinge.anchor;
+
             RegisterNeighbor(other);
             other.RegisterNeighbor(this);
         }
+        else
+        {
+            hinge2.connectedAnchor = closestHit.collider.transform.InverseTransformPoint(closestHit.point);
+        }
+
+        hinge2.enabled = true;
+        firstSegment = false;
+        isAttached = true;
     }
 }
 

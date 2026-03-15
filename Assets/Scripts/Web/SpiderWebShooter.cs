@@ -17,7 +17,7 @@ public class SpiderWebShooter : MonoBehaviour
     public int stringId = 0;
     public BoxCollider2D webRb;
     public float maxShootRange = 50f;
-    [Range(1f, 1.2f)] public float tensionFactor = 1.01f; // Low = Tight, High = Slack
+    [Range(.1f, 1.2f)] public float tensionFactor = 1.01f; // Low = Tight, High = Slack
     private float safetyRange;
     private DistanceJoint2D tetherJoint;
     private Transform currentTetherAnchor;
@@ -33,6 +33,14 @@ public class SpiderWebShooter : MonoBehaviour
     {
         // Initialize tethering physics immediately so other scripts can access it
         tetherJoint = gameObject.AddComponent<DistanceJoint2D>();
+        
+        // Prevent the automatically added Rigidbody2D from causing the parent to fall forever
+        Rigidbody2D rb = GetComponent<Rigidbody2D>();
+        if (rb != null)
+        {
+            rb.bodyType = RigidbodyType2D.Kinematic;
+        }
+
         tetherJoint.enabled = false;
         tetherJoint.autoConfigureDistance = false;
         tetherJoint.distance = 0.1f;

@@ -64,7 +64,7 @@ SpriteRenderer:
   m_RenderingLayerMask: 1
   m_RendererPriority: 0
   m_Materials:
-  - {fileID: 2100000, guid: a97c105638bdf8b4a8650670310a4cd3, type: 2}
+  - {fileID: 2100000, guid: 9dfc825aed78fcd4ba02077103263b40, type: 2}
   m_StaticBatchInfo:
     firstSubMesh: 0
     subMeshCount: 0
@@ -247,9 +247,14 @@ MonoBehaviour:
   ignoreTransform: {fileID: 8631385482739706274}
   ignoreRadius: 0
   neighbors: []
-  maxLightIntensity: 1
-  lightOuterRadius: 3
-  pulseColor: {r: 1, g: 1, b: 1, a: 0.0627451}
+  maxLightIntensity: 0.1
+  lightOuterRadius: 12
+  lightInnerRadius: 1
+  lightFalloff: 0.9
+  pulseDuration: 2.5
+  pulseAttackDuration: 0.5
+  pulseColor: {r: 1, g: 1, b: 1, a: 0}
+  spatialPulseRadius: 100
 --- !u!114 &518166404675363216
 MonoBehaviour:
   m_ObjectHideFlags: 0

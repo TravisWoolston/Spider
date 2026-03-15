@@ -12,6 +12,8 @@ public class SpiderPathfinding : MonoBehaviour
     [Header("A* Settings")]
     [Tooltip("Maximum nodes to evaluate before giving up on a path.")]
     public int maxIterations = 500;
+    [Tooltip("Movement cost multiplier for web strands. Values < 1 make the AI prefer webs.")]
+    public float webCostMultiplier = 0.5f;
 
     private void Awake()
     {
@@ -74,7 +76,10 @@ public class SpiderPathfinding : MonoBehaviour
             {
                 if (closedSet.Contains(point.point)) continue;
 
-                float gCost = currentNode.G + Vector2.Distance(currentNode.Position, point.point);
+                float stepDist = Vector2.Distance(currentNode.Position, point.point);
+                if (point.webTransform != null) stepDist *= webCostMultiplier;
+                
+                float gCost = currentNode.G + stepDist;
                 float hCost = Vector2.Distance(point.point, targetPosition);
 
                 // Check if we already have this point in open list

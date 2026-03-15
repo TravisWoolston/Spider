@@ -10,8 +10,8 @@ using System.Collections.Generic;
 public class WebStringRenderer : MonoBehaviour
 {
     [Header("Visual Settings")]
-    public float webWidth = 0.2f; // Slightly wider for better overlap
-    public Color baseColor = new Color(0.95f, 0.98f, 1f, 0.95f);
+    private float webWidth = 0.2f; // Slightly wider for better overlap
+    public Color baseColor = Color.white;
     
     private LineRenderer lineRenderer;
     private List<WebSegment> segments = new List<WebSegment>();
@@ -28,11 +28,11 @@ public class WebStringRenderer : MonoBehaviour
         lineRenderer.numCapVertices = 16;
         lineRenderer.numCornerVertices = 16;
 
-        // Use a soft, unlit material for that "silk" glow
-        Shader defaultShader = Shader.Find("Universal Render Pipeline/2D/Sprite-Unlit-Default");
-        if (defaultShader != null)
+        // Use a lit material so the web respects scene lighting and is hidden in darkness
+        Shader litShader = Shader.Find("Universal Render Pipeline/2D/Sprite-Lit-Default");
+        if (litShader != null)
         {
-            lineRenderer.material = new Material(defaultShader);
+            lineRenderer.material = new Material(litShader);
         }
         
         lineRenderer.startColor = baseColor;

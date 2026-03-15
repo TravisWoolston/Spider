@@ -61,6 +61,10 @@ public class SpiderControllerIK : MonoBehaviour
     private int nextLegIndex;
     private int lastSteppedIndex = -1;
 
+    // Zero-allocation buffers for physics queries
+    private RaycastHit2D[] hitBuffer = new RaycastHit2D[100];
+    private Collider2D[] overlapBuffer = new Collider2D[2000]; // Can comfortably handle large webs
+
     // Cached head transform — all orientation/position goes through this
     private Transform headT;
     private SpiderWebShooter shooter;
@@ -175,7 +179,7 @@ public class SpiderControllerIK : MonoBehaviour
                     // Only update if the new target is significantly different or better for the new direction
                     float dist = Vector2.Distance(leg.targetFootPos, best.point);
                     if (dist > minStride * 0.5f) 
-                        leg.UpdateStepTarget(best.point, best.normal);
+                        leg.UpdateStepTarget(best.point, best.normal, best.collider);
                 }
             }
         }
@@ -263,29 +267,47 @@ public class SpiderControllerIK : MonoBehaviour
             Vector2 dir = new Vector2(Mathf.Cos(rad), Mathf.Sin(rad));
 
             // Use RaycastAll so we can "See through" multiple strands of web
-            RaycastHit2D[] hits = Physics2D.RaycastAll(origin, dir, sightDistance, attachableLayers);
+            int hitCount = Physics2D.RaycastNonAlloc(origin, dir, hitBuffer, sightDistance, attachableLayers);
             
             // RAYCASTALL IS NOT ORDERED: We must sort by distance to handle obstructions correctly
-            System.Array.Sort(hits, (a, b) => a.distance.CompareTo(b.distance));
-
-            foreach (var hit in hits)
+            if (hitCount > 0)
             {
-                if (hit.collider == null) continue;
+                // Manual insertion sort for zero allocations (hitCount is typically small)
+                for (int n = 1; n < hitCount; n++)
+                {
+                    var key = hitBuffer[n];
+                    int m = n - 1;
+                    while (m >= 0 && hitBuffer[m].distance > key.distance)
+                    {
+                        hitBuffer[m + 1] = hitBuffer[m];
+                        m = m - 1;
+                    }
+                    hitBuffer[m + 1] = key;
+                }
 
-                float dist = Vector2.Distance(hit.point, origin);
-                if (hit.collider.gameObject.layer == webLayer && dist < 1.0f)
-                    continue;
+                for (int j = 0; j < hitCount; j++)
+                {
+                    var hit = hitBuffer[j];
+                    if (hit.collider == null) continue;
 
-                float localX = headT.InverseTransformPoint(hit.point).x;
-                var ap = new AttachmentPoint(hit.point, hit.normal, hit.collider);
+                    float dist = Vector2.Distance(hit.point, origin);
+                    if (hit.collider.gameObject.layer == webLayer && dist < 1.0f)
+                        continue;
 
-                if (localX < 0) leftPoints.Add(ap);
-                else            rightPoints.Add(ap);
-                
-                // Stop evaluating this ray ONLY if we hit a solid surface.
-                // If it's a web, keep looking for more web or ground behind it.
-                if (hit.collider.gameObject.layer != webLayer)
-                    break;
+                    float localX = headT.InverseTransformPoint(hit.point).x;
+                    var ap = new AttachmentPoint(hit.point, hit.normal, hit.collider);
+
+                    if (localX < 0) leftPoints.Add(ap);
+                    else            rightPoints.Add(ap);
+                    
+                    // Store in global manager for AI wandering
+                    GlobalAttachmentManager.StoreAttachmentPoint(hit.point, hit.normal, hit.collider.gameObject.layer == webLayer ? hit.collider.transform : null);
+                    
+                    // Stop evaluating this ray ONLY if we hit a solid surface.
+                    // If it's a web, keep looking for more web or ground behind it.
+                    if (hit.collider.gameObject.layer != webLayer)
+                        break;
+                }
             }
         }
 
@@ -293,58 +315,67 @@ public class SpiderControllerIK : MonoBehaviour
         foreach (var leg in legs)
         {
             Vector2 kneeOrigin = leg.GetKneePosition();
-            float kneeRayCount = 8;
+            float kneeRayCount = 30;
             float kneeStep = 360f / kneeRayCount;
             for (int i = 0; i < kneeRayCount; i++)
             {
                 float rad = i * kneeStep * Mathf.Deg2Rad;
                 Vector2 dir = new Vector2(Mathf.Cos(rad), Mathf.Sin(rad));
-                RaycastHit2D[] hits = Physics2D.RaycastAll(kneeOrigin, dir, sightDistance * 0.5f, attachableLayers);
-                System.Array.Sort(hits, (a, b) => a.distance.CompareTo(b.distance));
-
-                foreach (var hit in hits)
+                int hitCount = Physics2D.RaycastNonAlloc(kneeOrigin, dir, hitBuffer, sightDistance * 0.5f, attachableLayers);
+                
+                if (hitCount > 0)
                 {
-                    if (hit.collider == null) continue;
-                    float distFromHead = Vector2.Distance(hit.point, origin);
-                    
-                    // Allow webs even if they are very close to the head (overlap prevention)
-                    bool isWeb = hit.collider.gameObject.layer == webLayer;
-                    if (!isWeb && distFromHead < 1.0f)
-                        continue;
+                    // Manual insertion sort for zero allocations
+                    for (int n = 1; n < hitCount; n++)
+                    {
+                        var key = hitBuffer[n];
+                        int m = n - 1;
+                        while (m >= 0 && hitBuffer[m].distance > key.distance)
+                        {
+                            hitBuffer[m + 1] = hitBuffer[m];
+                            m = m - 1;
+                        }
+                        hitBuffer[m + 1] = key;
+                    }
 
-                    float localX = headT.InverseTransformPoint(hit.point).x;
-                    var ap = new AttachmentPoint(hit.point, hit.normal, hit.collider);
-                    if (localX < 0) leftPoints.Add(ap);
-                    else            rightPoints.Add(ap);
-                    
+                    for (int j = 0; j < hitCount; j++)
+                    {
+                        var hit = hitBuffer[j];
+                        if (hit.collider == null) continue;
+                        float distFromHead = Vector2.Distance(hit.point, origin);
+                        
+                        // Allow webs even if they are very close to the head (overlap prevention)
+                        bool isWeb = hit.collider.gameObject.layer == webLayer;
+                        if (!isWeb && distFromHead < 1.0f)
+                            continue;
+
+                        float localX = headT.InverseTransformPoint(hit.point).x;
+                        var ap = new AttachmentPoint(hit.point, hit.normal, hit.collider);
+                        if (localX < 0) leftPoints.Add(ap);
+                        else            rightPoints.Add(ap);
+                        
+                        // Store in global manager for AI wandering
+                        GlobalAttachmentManager.StoreAttachmentPoint(hit.point, hit.normal, isWeb ? hit.collider.transform : null);
+                    }
                 }
             }
         }
 
         // --- Volume-based Web Detection (The "Safety Net") ---
         // This finds webs that radial rays might miss because they are too thin or aligned with the ray
-        Collider2D[] webs = Physics2D.OverlapCircleAll(origin, sightDistance, LayerMask.GetMask("Web"));
-        foreach (var col in webs)
+        int overlapCount = Physics2D.OverlapCircleNonAlloc(origin, sightDistance, overlapBuffer, LayerMask.GetMask("Web"));
+        for (int i = 0; i < overlapCount; i++)
         {
-            Vector2 forward = headT.up;
-            Vector2 right = headT.right;
-
-            // Sample points along the strand to give the gait logic options for strides
-            float[] samples = { -0.5f, 0f, 0.5f, 1.0f }; 
-            foreach (float f in samples)
-            {
-                Vector2 sampleOrig = origin + forward * f * minStride * 2.5f;
-                
-                // Left side point on this strand
-                Vector2 leftTarget = sampleOrig - right * footSpacing * 2f;
-                Vector2 pL = col.ClosestPoint(leftTarget);
-                leftPoints.Add(new AttachmentPoint(pL, (origin - pL).normalized, col));
-
-                // Right side point on this strand
-                Vector2 rightTarget = sampleOrig + right * footSpacing * 2f;
-                Vector2 pR = col.ClosestPoint(rightTarget);
-                rightPoints.Add(new AttachmentPoint(pR, (origin - pR).normalized, col));
-            }
+            Collider2D col = overlapBuffer[i];
+            
+            // To drastically improve performance, use the segment's closest point 
+            // instead of generating multiple virtual sample points along the array.
+            // With hundreds of segments, generating 8 virtual points per segment was causing O(n^2) frame drops.
+            Vector2 pL = col.ClosestPoint(origin);
+            float localX = headT.InverseTransformPoint(pL).x;
+            var ap = new AttachmentPoint(pL, (origin - pL).normalized, col);
+            if (localX < 0) leftPoints.Add(ap);
+            else            rightPoints.Add(ap);
         }
     }
 
@@ -904,6 +935,10 @@ public class SpiderControllerIK : MonoBehaviour
                     WebSegment otherWs = col.GetComponent<WebSegment>();
                     if (otherWs != null && otherWs.stringId != shooter.stringId)
                         shouldStick = true;
+                }
+                else
+                {
+                    shouldStick = true; // Automatically stick to whatever non-web attachable surface we hit
                 }
                 
                 if (Input.GetMouseButtonDown(0))

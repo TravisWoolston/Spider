@@ -4,52 +4,94 @@ using UnityEngine;
 public static class GlobalAttachmentManager
 {
     public static List<GlobalAttachmentPoint> globalAttachmentPoints = new List<GlobalAttachmentPoint>();
-    public static float minimumDistanceBetweenPoints = 3f; // Minimum distance between stored global attachment points
+    
+    // Spatial Partitioning
+    private static float cellSize = 5f;
+    private static Dictionary<Vector2Int, List<GlobalAttachmentPoint>> grid = new Dictionary<Vector2Int, List<GlobalAttachmentPoint>>();
+    
+    public static float minimumDistanceBetweenPoints = 3f; 
+
+    private static Vector2Int WorldToGrid(Vector2 pos)
+    {
+        return new Vector2Int(Mathf.FloorToInt(pos.x / cellSize), Mathf.FloorToInt(pos.y / cellSize));
+    }
+
     public static void StoreAttachmentPoint(Vector2 point, Vector2 normal, Transform webTransform = null)
     {
-        bool tooClose = false;
-
-        foreach (var globalPoint in globalAttachmentPoints)
+        Vector2Int gridPos = WorldToGrid(point);
+        
+        // Check current and neighboring cells only (3x3 grid)
+        for (int x = -1; x <= 1; x++)
         {
-            if (Vector2.Distance(globalPoint.point, point) < minimumDistanceBetweenPoints)
+            for (int y = -1; y <= 1; y++)
             {
-                tooClose = true;
-                break;
+                Vector2Int cell = gridPos + new Vector2Int(x, y);
+                if (grid.TryGetValue(cell, out var pointsInCell))
+                {
+                    foreach (var gap in pointsInCell)
+                    {
+                        if (Vector2.SqrMagnitude(gap.point - point) < minimumDistanceBetweenPoints * minimumDistanceBetweenPoints)
+                        {
+                            return; // Too close
+                        }
+                    }
+                }
             }
         }
 
-        if (!tooClose)
-        {
-            globalAttachmentPoints.Add(new GlobalAttachmentPoint(point, normal, webTransform));
-        }
+        // Add new point
+        var newPoint = new GlobalAttachmentPoint(point, normal, webTransform);
+        globalAttachmentPoints.Add(newPoint);
+        
+        if (!grid.ContainsKey(gridPos)) grid[gridPos] = new List<GlobalAttachmentPoint>();
+        grid[gridPos].Add(newPoint);
     }
 
     public static List<GlobalAttachmentPoint> GetPointsInRange(Vector2 position, float range)
     {
-        List<GlobalAttachmentPoint> pointsInRange = new List<GlobalAttachmentPoint>();
+        List<GlobalAttachmentPoint> results = new List<GlobalAttachmentPoint>();
+        Vector2Int min = WorldToGrid(position - new Vector2(range, range));
+        Vector2Int max = WorldToGrid(position + new Vector2(range, range));
+        float rangeSqr = range * range;
 
-        foreach (var point in globalAttachmentPoints)
+        for (int x = min.x; x <= max.x; x++)
         {
-            if (Vector2.Distance(position, point.point) <= range)
+            for (int y = min.y; y <= max.y; y++)
             {
-                pointsInRange.Add(point);
+                Vector2Int cell = new Vector2Int(x, y);
+                if (grid.TryGetValue(cell, out var pointsInCell))
+                {
+                    foreach (var gap in pointsInCell)
+                    {
+                        if (Vector2.SqrMagnitude(gap.point - position) <= rangeSqr)
+                        {
+                            results.Add(gap);
+                        }
+                    }
+                }
             }
         }
 
-        return pointsInRange;
+        return results;
     }
 
     public static void UpdateWebAttachmentPoints()
     {
-        foreach (var globalPoint in globalAttachmentPoints)
+        // Clear grid and rebuild as positions change
+        grid.Clear();
+        foreach (var gap in globalAttachmentPoints)
         {
-            globalPoint.UpdatePosition();
+            gap.UpdatePosition();
+            Vector2Int gridPos = WorldToGrid(gap.point);
+            if (!grid.ContainsKey(gridPos)) grid[gridPos] = new List<GlobalAttachmentPoint>();
+            grid[gridPos].Add(gap);
         }
     }
 
     public static void RemoveStalePoints()
     {
         globalAttachmentPoints.RemoveAll(point => point.webTransform == null);
+        UpdateWebAttachmentPoints(); // Rebuild grid
     }
 }
 

@@ -82,18 +82,32 @@ public class WebSegment : MonoBehaviour
     public List<WebSegment> neighbors = new List<WebSegment>();
 
     private Light2D pulseLight;
-    public float maxLightIntensity = 50.0f; // Increased for better visibility
+    public float maxLightIntensity = 20.0f; // Lowered to prevent yellowish saturation
     public float lightOuterRadius = 1000.0f;  // Increased radius
-    public Color pulseColor = Color.white; // Neutral white light
+    public float lightInnerRadius = 0.0f;    // Where the light starts to dim
+    public float lightFalloff = 0.5f;        // 0 = Sharp, 1 = Very gradual/soft
+    public float pulseDuration = 0.6f;      // How long the light takes to fade out
+    public float pulseAttackDuration = 0.1f; // How long the light takes to reach peak brightness
+    public Color pulseColor = Color.white;  // Pulse color for the sprite
+    public float spatialPulseRadius = 15f;  // Radius for immediate spatial glow
 
     void Start()
     {
         rb = GetComponent<Rigidbody2D>();
         // hinge = GetComponent<HingeJoint2D>();
         spriteRenderer = GetComponent<SpriteRenderer>();
+        
+        // Force neutral white colors to avoid yellowish tints from the inspector
+        pulseColor = Color.white;
+        
+        // Aggressively force neutral white to override any yellow inspector settings
+        pulseColor = Color.white;
+        
         if (spriteRenderer != null)
         {
-            originalColor = spriteRenderer.color;
+            // If the sprite itself is yellowish, we force it to white to ensure the pulse is clean
+            spriteRenderer.color = Color.white;
+            originalColor = Color.white;
         }
 
         pulseLight = GetComponent<Light2D>();
@@ -106,9 +120,11 @@ public class WebSegment : MonoBehaviour
         if (pulseLight != null)
         {
             pulseLight.intensity = 0;
+            pulseLight.pointLightInnerRadius = lightInnerRadius;
             pulseLight.pointLightOuterRadius = lightOuterRadius;
-            pulseLight.color = pulseColor;
-            pulseLight.shadowsEnabled = false; // Usually better for performance and visibility here
+            pulseLight.falloffIntensity = lightFalloff;
+            pulseLight.color = Color.white;
+            pulseLight.shadowsEnabled = false; 
         }
     }
 
@@ -122,12 +138,30 @@ public class WebSegment : MonoBehaviour
 
     public void TriggerPulse()
     {
-        // Debug.Log($"[WebSense] Pulse triggered on segment {gameObject.name} (String ID: {stringId})");
         currentPulseId++;
-        Pulse(1.0f, currentPulseId);
+        Vector2 sourcePos = (Vector2)transform.position;
+
+        // Perform a spatial query to find all web segments in range
+        Collider2D[] webColliders = Physics2D.OverlapCircleAll(sourcePos, spatialPulseRadius, LayerMask.GetMask("Web"));
+        
+        foreach (var col in webColliders)
+        {
+            var segment = col.GetComponent<WebSegment>();
+            if (segment != null)
+            {
+                float dist = Vector2.Distance(sourcePos, (Vector2)segment.transform.position);
+                float strength = Mathf.Clamp01(1f - (dist / spatialPulseRadius));
+                
+                // Use a non-linear falloff for a more natural look
+                strength = Mathf.Pow(strength, 1.2f);
+                
+                // Pulse immediately without propagation (since we've already found everyone spatially)
+                segment.Pulse(strength, currentPulseId, false);
+            }
+        }
     }
 
-    public void Pulse(float strength, int pulseId)
+    public void Pulse(float strength, int pulseId, bool propagate = true)
     {
         if (lastPulseId == pulseId || strength <= 0.01f)
         {
@@ -135,41 +169,59 @@ public class WebSegment : MonoBehaviour
         }
         lastPulseId = pulseId;
 
+        // Capture current state to lerp from instead of snapping
+        float startInt = (pulseLight != null) ? pulseLight.intensity / maxLightIntensity : 0f;
+
         StopAllCoroutines();
-        StartCoroutine(PulseRoutine(strength, pulseId));
+        StartCoroutine(PulseRoutine(strength, pulseId, propagate, startInt));
     }
 
-    private IEnumerator PulseRoutine(float strength, int pulseId)
+    private IEnumerator PulseRoutine(float targetStrength, int pulseId, bool propagate, float startStrength)
     {
-        float duration = 0.6f; // Slightly longer for better visibility
+        float duration = pulseDuration;
+        float attack = pulseAttackDuration;
         float elapsed = 0;
         
-        // Propagate pulse to neighbors after a small delay
+        // Propagation settings (ignored if propagate is false)
         float propagationDelay = 0.04f;
-        // Start showing local pulse immediately
         
         while (elapsed < duration)
         {
             elapsed += Time.deltaTime;
-            float t = elapsed / duration;
+            float currentStrength;
+
+            if (elapsed < attack)
+            {
+                // Ramp up from wherever we were to the new peak
+                float t = elapsed / attack;
+                currentStrength = Mathf.Lerp(startStrength, targetStrength, t);
+            }
+            else
+            {
+                // Fade out normally
+                float t = (elapsed - attack) / (duration - attack);
+                currentStrength = Mathf.Lerp(targetStrength, 0, t);
+            }
+
             if (spriteRenderer != null)
             {
-                spriteRenderer.color = Color.Lerp(pulseColor, originalColor, t);
+                spriteRenderer.color = Color.Lerp(originalColor, pulseColor, currentStrength);
             }
 
             if (pulseLight != null)
             {
-                pulseLight.intensity = Mathf.Lerp(maxLightIntensity * strength, 0, t);
+                pulseLight.color = Color.white;
+                pulseLight.intensity = maxLightIntensity * currentStrength;
             }
 
-            if (elapsed >= propagationDelay && propagationDelay > 0)
+            if (propagate && elapsed >= propagationDelay && propagationDelay > 0)
             {
-                // Propagate once
+                // Propagate once to neighbors
                 foreach (var neighbor in neighbors)
                 {
                     if (neighbor != null)
                     {
-                        neighbor.Pulse(strength * 0.96f, pulseId); // Slower decay
+                        neighbor.Pulse(targetStrength * 0.96f, pulseId, true);
                     }
                 }
                 propagationDelay = -1f; 
@@ -215,20 +267,23 @@ public class WebSegment : MonoBehaviour
     //         isAttached = true;
     //     }
     // }
-public void CheckContact()
-{
-    // Define the direction of the raycast from hinge2 to the other end (hinge)
-    Vector2 rayDirection = -transform.right;  // This assumes the object is facing along its 'right' axis
+    private static RaycastHit2D[] contactHitsBuffer = new RaycastHit2D[50]; // Static buffer for zero-alloc raycasting
 
-    // Perform the raycast from the position of hinge2 in the direction of the target
-    RaycastHit2D[] hits = Physics2D.RaycastAll(hinge2.transform.position, rayDirection, overlapRadius, defaultLayer | LayerMask.GetMask("Web"));
-    
-    RaycastHit2D closestHit = new RaycastHit2D();
-    float closestDistance = float.MaxValue;
-
-    foreach (RaycastHit2D hit in hits)
+    public void CheckContact()
     {
-        if (hit.collider != null)
+        // Define the direction of the raycast from hinge2 to the other end (hinge)
+        Vector2 rayDirection = -transform.right;  // This assumes the object is facing along its 'right' axis
+
+        // Perform the raycast from the position of hinge2 in the direction of the target
+        int hitCount = Physics2D.RaycastNonAlloc(hinge2.transform.position, rayDirection, contactHitsBuffer, overlapRadius, defaultLayer | LayerMask.GetMask("Web"));
+        
+        RaycastHit2D closestHit = new RaycastHit2D();
+        float closestDistance = float.MaxValue;
+
+        for (int i = 0; i < hitCount; i++)
+        {
+            RaycastHit2D hit = contactHitsBuffer[i];
+            if (hit.collider != null)
         {
             // Safety Check: Don't attach to things too close to the spider's head during firing
             if (ignoreTransform != null && Vector2.Distance(hit.point, ignoreTransform.position) < ignoreRadius)
@@ -280,6 +335,13 @@ public void CheckContact()
 
             RegisterNeighbor(other);
             other.RegisterNeighbor(this);
+
+            var myCol = GetComponent<Collider2D>();
+            var otherCol = other.GetComponent<Collider2D>();
+            if (myCol != null && otherCol != null)
+            {
+                Physics2D.IgnoreCollision(myCol, otherCol);
+            }
         }
         else
         {
@@ -385,14 +447,15 @@ public void CheckContact()
 
             return true; // Stop creating more segments
         }
-        RaycastHit2D[] webHits = Physics2D.RaycastAll(
+        int hitCount = Physics2D.RaycastNonAlloc(
             hinge.transform.position,
             transform.right,
+            contactHitsBuffer,
             overlapRadius,
             LayerMask.GetMask("Web")
         );
-        foreach(RaycastHit2D webHit in webHits){
-
+        for(int i = 0; i < hitCount; i++){
+            RaycastHit2D webHit = contactHitsBuffer[i];
         
         if (webHit.collider != null)
         {
@@ -423,6 +486,13 @@ public void CheckContact()
             {
                 RegisterNeighbor(other);
                 other.RegisterNeighbor(this);
+                
+                var myCol = GetComponent<Collider2D>();
+                var otherCol = other.GetComponent<Collider2D>();
+                if (myCol != null && otherCol != null)
+                {
+                    Physics2D.IgnoreCollision(myCol, otherCol);
+                }
             }
 
             return true;

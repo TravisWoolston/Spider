@@ -13,6 +13,14 @@ public class SpiderAI : MonoBehaviour
     public float arrivalDistance = 2f;
     public float pathRecalculationInterval = 1f;
 
+    [Header("Wandering")]
+    public bool isWandering = true;
+    public float wanderRadius = 20f;
+    public float webPreferenceWeight = 10f;
+    public float wanderWaitTime = 2f;
+    private Vector2? wanderTarget = null;
+    private float wanderTimer = 0f;
+
     [Header("Path Data")]
     public List<Vector2> path = new List<Vector2>();
     private int currentWaypointIndex = 0;
@@ -31,22 +39,63 @@ public class SpiderAI : MonoBehaviour
     {
         if (target != null)
         {
-            CalculateNewPath();
-            StartCoroutine(RecalculatePathPeriodically());
+            CalculateNewPath(target.position);
         }
+        else if (isWandering)
+        {
+            // Initial wander target
+            PickWanderTarget();
+        }
+        
+        StartCoroutine(RecalculatePathPeriodically());
     }
 
     void FixedUpdate()
     {
-        if (spiderController == null || target == null) return;
+        if (spiderController == null) return;
 
-        Vector2 headPos = spiderController.headRb.position;
-        float distToTarget = Vector2.Distance(headPos, target.position);
+        Vector2 headPos = (Vector2)spiderController.headRb.position;
+        Vector2 currentGoal;
 
-        // 1. Goal Check
-        if (distToTarget < arrivalDistance)
+        if (target != null)
+        {
+            currentGoal = (Vector2)target.position;
+        }
+        else if (isWandering)
+        {
+            if (wanderTarget == null)
+            {
+                PickWanderTarget();
+                if (wanderTarget == null) 
+                {
+                    spiderController.inputDirection = Vector2.zero;
+                    return;
+                }
+            }
+            currentGoal = wanderTarget.Value;
+        }
+        else
         {
             spiderController.inputDirection = Vector2.zero;
+            return;
+        }
+
+        float distToGoal = Vector2.Distance(headPos, currentGoal);
+
+        // 1. Goal Check
+        if (distToGoal < arrivalDistance)
+        {
+            spiderController.inputDirection = Vector2.zero;
+            
+            if (isWandering && target == null)
+            {
+                wanderTimer += Time.fixedDeltaTime;
+                if (wanderTimer >= wanderWaitTime)
+                {
+                    PickWanderTarget();
+                    wanderTimer = 0;
+                }
+            }
             return;
         }
 
@@ -60,7 +109,6 @@ public class SpiderAI : MonoBehaviour
             spiderController.inputDirection = direction;
 
             // Check if we've reached the current waypoint
-            // We use legExtensionMax as a logical "reach" distance
             if (Vector2.Distance(headPos, targetWaypoint) < spiderController.legExtensionMax * 0.5f)
             {
                 currentWaypointIndex++;
@@ -68,23 +116,75 @@ public class SpiderAI : MonoBehaviour
         }
         else
         {
-            // If we run out of path, try to recalculate or just move towards target directly
-            if (distToTarget > spiderController.legExtensionMax)
+            // If we run out of path, try to recalculate or just move towards goal directly
+            if (distToGoal > spiderController.legExtensionMax)
             {
-                CalculateNewPath();
+                CalculateNewPath(currentGoal);
             }
             else
             {
-                spiderController.inputDirection = (Vector2)(target.position - (Vector3)headPos).normalized;
+                spiderController.inputDirection = (currentGoal - headPos).normalized;
             }
         }
     }
 
-    void CalculateNewPath()
+    void PickWanderTarget()
     {
-        if (spiderPathfinding != null && target != null)
+        if (GlobalAttachmentManager.globalAttachmentPoints.Count == 0) return;
+
+        Vector2 headPos = spiderController.headRb.position;
+        
+        // Weighted random selection
+        float totalWeight = 0;
+        List<(Vector2 pos, float weight)> weightedPoints = new List<(Vector2, float)>();
+        
+        foreach (var point in GlobalAttachmentManager.globalAttachmentPoints)
         {
-            path = spiderPathfinding.CalculatePath(spiderController.headRb.position, target.position);
+            float dist = Vector2.Distance(headPos, point.point);
+            if (dist > wanderRadius || dist < arrivalDistance) continue;
+
+            float weight = 1.0f;
+            if (point.webTransform != null) weight = webPreferenceWeight;
+            
+            // Favor points that are further away within the radius to encourage exploration
+            float distRatio = dist / wanderRadius;
+            weight *= (distRatio * distRatio); 
+
+            weightedPoints.Add((point.point, weight));
+            totalWeight += weight;
+        }
+
+        if (weightedPoints.Count == 0)
+        {
+            // Fallback: Pick any point in range if no weighted points found
+            var allPoints = GlobalAttachmentManager.GetPointsInRange(headPos, wanderRadius);
+            if (allPoints.Count > 0)
+            {
+                wanderTarget = allPoints[Random.Range(0, allPoints.Count)].point;
+                CalculateNewPath(wanderTarget.Value);
+            }
+            return;
+        }
+
+        float randomVal = Random.value * totalWeight;
+        float currentWeightSum = 0;
+        foreach (var wp in weightedPoints)
+        {
+            currentWeightSum += wp.weight;
+            if (randomVal <= currentWeightSum)
+            {
+                wanderTarget = wp.pos;
+                CalculateNewPath(wanderTarget.Value);
+                break;
+            }
+        }
+    }
+
+    void CalculateNewPath(Vector2 goalPos)
+    {
+        if (spiderPathfinding != null)
+        {
+            path = spiderPathfinding.CalculatePath(spiderController.headRb.position, goalPos);
             currentWaypointIndex = 0;
         }
     }
@@ -94,7 +194,14 @@ public class SpiderAI : MonoBehaviour
         while (true)
         {
             yield return new WaitForSeconds(pathRecalculationInterval);
-            CalculateNewPath();
+            if (target != null)
+            {
+                CalculateNewPath(target.position);
+            }
+            else if (isWandering && wanderTarget != null)
+            {
+                CalculateNewPath(wanderTarget.Value);
+            }
         }
     }
 
@@ -108,6 +215,12 @@ public class SpiderAI : MonoBehaviour
                 Gizmos.DrawLine(path[i], path[i + 1]);
                 Gizmos.DrawWireSphere(path[i], 0.2f);
             }
+        }
+
+        if (wanderTarget != null)
+        {
+            Gizmos.color = Color.yellow;
+            Gizmos.DrawWireSphere(wanderTarget.Value, 0.5f);
         }
     }
 }

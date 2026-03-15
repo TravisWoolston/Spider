@@ -16,6 +16,11 @@ public class GridCameraController : MonoBehaviour
     public float camZoom = .1f;
     public bool followSpider = false;
     public float followSmoothing = 5f;
+    
+    [Header("Zoom Settings")]
+    public float scrollSensitivity = 15f;
+    public float minZoom = 2f;
+    public float maxZoom = 40f;
 
     void Start()
     {
@@ -34,6 +39,13 @@ public class GridCameraController : MonoBehaviour
 
     void LateUpdate()
     {
+        // Zoom Control
+        float scroll = Input.GetAxis("Mouse ScrollWheel");
+        if (scroll != 0)
+        {
+            cam.orthographicSize -= scroll * scrollSensitivity;
+        }
+
         if (Input.GetKey(KeyCode.Keypad1))
         {
             cam.orthographicSize -= camZoom;
@@ -42,6 +54,8 @@ public class GridCameraController : MonoBehaviour
         {
             cam.orthographicSize += camZoom;
         }
+
+        cam.orthographicSize = Mathf.Clamp(cam.orthographicSize, minZoom, maxZoom);
 
         if (spiderHead == null || cam == null) return;
 

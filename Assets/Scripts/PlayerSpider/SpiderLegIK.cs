@@ -332,11 +332,24 @@ public class SpiderLegIK : MonoBehaviour
         StartCoroutine(StepCoroutine());
     }
 
-    public void UpdateStepTarget(Vector2 worldTarget, Vector2 normal)
+    public void UpdateStepTarget(Vector2 worldTarget, Vector2 normal, Collider2D col = null)
     {
         if (!isStepping) return;
         currentStepTarget = worldTarget;
         currentStepNormal = normal;
+
+        // CRITICAL: Update the tracking data so SyncToSurface doesn't overwrite this reactive adjustment
+        if (col != null)
+        {
+            plantedTransform = col.transform;
+            plantedRb = col.GetComponentInParent<Rigidbody2D>();
+            plantedLocalPos = plantedTransform.InverseTransformPoint(worldTarget);
+        }
+        else if (plantedTransform != null)
+        {
+            // If the surface didn't change, just update the local anchor point on the current surface
+            plantedLocalPos = plantedTransform.InverseTransformPoint(worldTarget);
+        }
     }
 
     IEnumerator StepCoroutine()
@@ -387,6 +400,13 @@ public class SpiderLegIK : MonoBehaviour
         {
             plantedLocalPos = plantedTransform.InverseTransformPoint(currentStepTarget);
             currentFootPos = plantedTransform.TransformPoint(plantedLocalPos);
+
+            // Web Pulse Illumination: Trigger pulse when stepping on webs
+            var web = plantedTransform.GetComponent<WebSegment>();
+            if (web != null)
+            {
+                web.TriggerPulse();
+            }
         }
     }
 
@@ -418,18 +438,24 @@ public class SpiderLegIK : MonoBehaviour
     {
         if (plantedTransform != null)
         {
-            // Always update the step target if we have one, so mid-air steps track moving webs
-            currentStepTarget = plantedTransform.TransformPoint(plantedLocalPos);
-
-            if (isPlanted && !isStepping)
+            // Update the world position based on the transform it's attached to
+            Vector2 newWorldPos = plantedTransform.TransformPoint(plantedLocalPos);
+            
+            if (isStepping)
             {
-                currentFootPos = currentStepTarget;
-                targetFootPos = currentFootPos;
+                // If we are stepping, we update the target so the leg follows the moving surface mid-air
+                currentStepTarget = newWorldPos;
+            }
+            else if (isPlanted)
+            {
+                // If we are planted, the foot stays locked to the surface
+                currentFootPos = newWorldPos;
+                targetFootPos  = newWorldPos;
             }
         }
     }
 
-    void Update()
+    void FixedUpdate()
     {
         SyncToSurface();
     }

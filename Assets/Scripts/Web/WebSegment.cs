@@ -125,6 +125,7 @@ public class WebSegment : MonoBehaviour
             pulseLight.falloffIntensity = lightFalloff;
             pulseLight.color = Color.white;
             pulseLight.shadowsEnabled = false; 
+            pulseLight.enabled = false;
         }
     }
 
@@ -136,16 +137,19 @@ public class WebSegment : MonoBehaviour
         }
     }
 
+    private static Collider2D[] pulseCollidersBuffer = new Collider2D[2000];
+
     public void TriggerPulse()
     {
         currentPulseId++;
         Vector2 sourcePos = (Vector2)transform.position;
 
-        // Perform a spatial query to find all web segments in range
-        Collider2D[] webColliders = Physics2D.OverlapCircleAll(sourcePos, spatialPulseRadius, LayerMask.GetMask("Web"));
+        // Perform a spatial non-alloc query to find all web segments in range
+        int count = Physics2D.OverlapCircleNonAlloc(sourcePos, spatialPulseRadius, pulseCollidersBuffer, LayerMask.GetMask("Web"));
         
-        foreach (var col in webColliders)
+        for (int i = 0; i < count; i++)
         {
+            var col = pulseCollidersBuffer[i];
             var segment = col.GetComponent<WebSegment>();
             if (segment != null)
             {
@@ -185,6 +189,11 @@ public class WebSegment : MonoBehaviour
         // Propagation settings (ignored if propagate is false)
         float propagationDelay = 0.04f;
         
+        if (pulseLight != null)
+        {
+            pulseLight.enabled = true;
+        }
+
         while (elapsed < duration)
         {
             elapsed += Time.deltaTime;
@@ -237,6 +246,7 @@ public class WebSegment : MonoBehaviour
         if (pulseLight != null)
         {
             pulseLight.intensity = 0;
+            pulseLight.enabled = false;
         }
     }
 

@@ -232,7 +232,7 @@ public class SpiderWebShooter : MonoBehaviour
             segmentRb.linearDamping = 2f;
             segmentRb.angularDamping = 2f;
             segmentRb.gravityScale = 0.5f; // Reduce sag tension
-            segmentRb.collisionDetectionMode = CollisionDetectionMode2D.Continuous;
+            segmentRb.collisionDetectionMode = CollisionDetectionMode2D.Discrete; // Use Discrete to save massive CPU physics cost for joined chains
         }
 
         // 4. Mathematical Joint Precision

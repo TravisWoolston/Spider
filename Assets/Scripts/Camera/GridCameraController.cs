@@ -1,9 +1,10 @@
 using UnityEngine;
 using System.Collections;
+
 public class GridCameraController : MonoBehaviour
 {
-    public Transform spiderHead; // Reference to the spider's head
-    public Vector3 offset; // Offset from the spider's head
+    public Rigidbody2D targetRb; // Reference to the target's rigidbody
+    public Vector3 offset; // Offset from the target
 
     private Camera cam;
     private Vector3 initialPosition;
@@ -11,10 +12,10 @@ public class GridCameraController : MonoBehaviour
     public float transitionMod = 0f;
     public float transitionModStore;
     public bool disableTransition;
-     public Vector3 targetPosition; // Target position for the camera
+    public Vector3 targetPosition; // Target position for the camera
     public float transitionSpeed = 2f;
     public float camZoom = .1f;
-    public bool followSpider = false;
+    public bool followTarget = false;
     public float followSmoothing = 5f;
     
     [Header("Zoom Settings")]
@@ -26,12 +27,12 @@ public class GridCameraController : MonoBehaviour
     {
         cam = GetComponentInChildren<Camera>();
 
-        if (spiderHead == null)
+        if (targetRb == null)
         {
-            Debug.LogError("Spider head not assigned to CameraController.");
-            enabled = false;
-            return;
+            Debug.LogWarning("Target Rigidbody not assigned to GridCameraController. Trying to find one on this object...");
+            targetRb = GetComponent<Rigidbody2D>();
         }
+        
         initialPosition = transform.position;
         transitionModStore = transitionMod;
         targetPosition = transform.position;
@@ -57,19 +58,19 @@ public class GridCameraController : MonoBehaviour
 
         cam.orthographicSize = Mathf.Clamp(cam.orthographicSize, minZoom, maxZoom);
 
-        if (spiderHead == null || cam == null) return;
+        if (targetRb == null || cam == null) return;
 
-        if (followSpider)
+        if (followTarget)
         {
-            // Smoothly follow the spider's head directly
-            Vector3 goal = new Vector3(spiderHead.position.x, spiderHead.position.y, transform.position.z) + offset;
+            // Smoothly follow the target directly
+            Vector3 goal = new Vector3(targetRb.position.x, targetRb.position.y, transform.position.z) + offset;
             transform.position = Vector3.Lerp(transform.position, goal, Time.deltaTime * followSmoothing);
             targetPosition = transform.position; // Keep targetPosition synced for when toggle is turned off
         }
         else
         {
             // Existing Grid-based movement logic
-            Vector3 viewportPoint = cam.WorldToViewportPoint(spiderHead.position);
+            Vector3 viewportPoint = cam.WorldToViewportPoint(targetRb.position);
             if (disableTransition)
             {
                 transitionMod = 0;
@@ -89,7 +90,7 @@ public class GridCameraController : MonoBehaviour
             {
                 disableTransition = false;
                 transitionMod = transitionModStore;
-                targetPosition.y = spiderHead.position.y;
+                targetPosition.y = targetRb.position.y;
             }
 
             if ((viewportPoint.x < 0 + transitionMod || viewportPoint.x > 1 - transitionMod) && !disableTransition)

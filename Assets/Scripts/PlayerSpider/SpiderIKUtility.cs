@@ -18,7 +18,7 @@ public static class SpiderIKUtility
         // Clamp distance to reach (prevent NaN)
         float maxReach = a + b;
         float minReach = Mathf.Abs(a - b);
-        d = Mathf.Clamp(d, minReach + 0.01f, maxReach - 0.01f);
+        d = Mathf.Clamp(d, minReach + 0.001f, maxReach - 0.001f);
         d2 = d * d;
 
         // Law of Cosines for interior angles

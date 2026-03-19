@@ -40,7 +40,9 @@ public class SpiderControllerIK : MonoBehaviour
 
     [Header("Raycasting")]
     public int   rayCount      = 100;
+    public int   kneeRayCount  = 40;
     public float sightDistance  = 15f;
+    public float kneeRayScale   = 0.6f;
 
     [Header("Web Physics")]
     public float spiderWeightMult = 1.0f; // Factor of spider's mass applied to web segments
@@ -54,6 +56,7 @@ public class SpiderControllerIK : MonoBehaviour
     [HideInInspector] public Vector2 inputDirection;
     private Vector2 smoothedInput;
     private Vector2 currentSurfaceNormal = Vector2.up;
+    private float groundFactor = 1.0f; // 1.0 on solid ground, 0.0 on webs
 
     private List<AttachmentPoint> leftPoints  = new();
     private List<AttachmentPoint> rightPoints = new();
@@ -234,7 +237,7 @@ public class SpiderControllerIK : MonoBehaviour
             foreach (var ap in rightPoints) 
                 if (Vector2.Dot(ap.point - (Vector2)headT.position, smoothedInput.normalized) > 0.5f) pointsAhead++;
 
-            if (pointsAhead < 2) 
+            if (pointsAhead < 2 && groundFactor < 0.1f) 
                 targetBodyHeight = Mathf.Lerp(targetBodyHeight, bodyHeightMin, Time.deltaTime * 3f);
             else
                 targetBodyHeight = Mathf.MoveTowards(targetBodyHeight, defaultBodyHeight + dodgeBias * 3f, Time.deltaTime * 3f);
@@ -244,7 +247,9 @@ public class SpiderControllerIK : MonoBehaviour
             targetBodyHeight = Mathf.MoveTowards(targetBodyHeight, defaultBodyHeight, Time.deltaTime * 2f);
         }
 
-        targetBodyHeight = Mathf.Clamp(targetBodyHeight, bodyHeightMin, bodyHeightMax);
+        // Clamp height: Prevent negative height if on solid ground
+        float minHeight = groundFactor > 0.1f ? 0.2f : bodyHeightMin;
+        targetBodyHeight = Mathf.Clamp(targetBodyHeight, minHeight, bodyHeightMax);
         bodyHeight = Mathf.MoveTowards(bodyHeight, targetBodyHeight, bodyHeightSpeed * Time.deltaTime);
     }
 
@@ -315,13 +320,12 @@ public class SpiderControllerIK : MonoBehaviour
         foreach (var leg in legs)
         {
             Vector2 kneeOrigin = leg.GetKneePosition();
-            float kneeRayCount = 30;
             float kneeStep = 360f / kneeRayCount;
             for (int i = 0; i < kneeRayCount; i++)
             {
                 float rad = i * kneeStep * Mathf.Deg2Rad;
                 Vector2 dir = new Vector2(Mathf.Cos(rad), Mathf.Sin(rad));
-                int hitCount = Physics2D.RaycastNonAlloc(kneeOrigin, dir, hitBuffer, sightDistance * 0.5f, attachableLayers);
+                int hitCount = Physics2D.RaycastNonAlloc(kneeOrigin, dir, hitBuffer, sightDistance * kneeRayScale, attachableLayers);
                 
                 if (hitCount > 0)
                 {
@@ -742,7 +746,7 @@ public class SpiderControllerIK : MonoBehaviour
                 groundPlanted++;
         }
         // groundFactor is 1.0 on solid floor, ~0.0 on webs.
-        float groundFactor = (float)groundPlanted / Mathf.Max(1, planted);
+        groundFactor = (float)groundPlanted / Mathf.Max(1, planted);
 
         // Multi-leg stability on strands: 
         // If we have many legs on the SAME strand, we can move more confidently.
@@ -824,6 +828,22 @@ public class SpiderControllerIK : MonoBehaviour
         }
         
         Vector2 targetPos = (posSum / planted);
+
+        // 3.5 Surface-Aware Height Adjustment: Prevent the body from 'clipping' into sharp crests.
+        // On sharp curves, the average foot position (posSum/planted) is often deep inside the collider.
+        // We do a belly-raycast to find the actual ground under our center and use that as the height base.
+        float searchRadius = bodyHeight > 0 ? bodyHeight * 2.0f : 2.0f;
+        RaycastHit2D centerHit = Physics2D.Raycast(targetPos + avgNormal * searchRadius, -avgNormal, searchRadius * 2.0f, attachableLayers);
+        if (centerHit.collider != null)
+        {
+            float surfaceProg = Vector2.Dot(centerHit.point, avgNormal);
+            float targetProg  = Vector2.Dot(targetPos, avgNormal);
+            if (targetProg < surfaceProg)
+            {
+                // Lift the target position to be exactly at the surface before adding effectHeight
+                targetPos += avgNormal * (surfaceProg - targetProg);
+            }
+        }
 
         
         // Scale body height and lead: 
@@ -1031,6 +1051,23 @@ public class SpiderControllerIK : MonoBehaviour
         foreach (var ap in leftPoints) Gizmos.DrawSphere(ap.point, 0.1f);
         Gizmos.color = new Color(0, 0, 1, 0.4f);
         foreach (var ap in rightPoints) Gizmos.DrawSphere(ap.point, 0.1f);
+
+        // Show Knee Ray Coverage (Faint rays to verify detection on corners)
+        if (Application.isPlaying)
+        {
+            Gizmos.color = new Color(0, 1, 1, 0.05f);
+            foreach (var leg in legs)
+            {
+                Vector2 knee = leg.GetKneePosition();
+                float kneeStep = 360f / kneeRayCount;
+                for (int i = 0; i < kneeRayCount; i++)
+                {
+                    float rad = i * kneeStep * Mathf.Deg2Rad;
+                    Vector2 dir = new Vector2(Mathf.Cos(rad), Mathf.Sin(rad));
+                    Gizmos.DrawRay(knee, dir * (sightDistance * kneeRayScale));
+                }
+            }
+        }
 
         Gizmos.color = Color.yellow;
         Gizmos.DrawRay(headPos, inputDirection * 3f);

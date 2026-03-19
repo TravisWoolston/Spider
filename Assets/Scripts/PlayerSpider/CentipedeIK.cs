@@ -11,6 +11,7 @@ public class CentipedeIK : MonoBehaviour
     [Header("IK Solver")]
     public SolverMode solverMode = SolverMode.LimbSolver;
     public bool isAI = false;
+    [SerializeField, HideInInspector] private CentipedeAI ai;
 
     [Header("Centipede Generation")]
     public GameObject bodySegmentPrefab;
@@ -132,6 +133,10 @@ public class CentipedeIK : MonoBehaviour
             // 2. Auto-discover Head/Body
             if (headRb == null) headRb = GetComponent<Rigidbody2D>();
             if (headRb == null) headRb = GetComponentInChildren<Rigidbody2D>();
+
+            // 3. Auto-discover AI Controller
+            if (ai == null) ai = GetComponent<CentipedeAI>();
+            if (ai == null) ai = GetComponentInChildren<CentipedeAI>();
         }
 
         // Initialize Body Height Persistence
@@ -1058,23 +1063,36 @@ public class CentipedeIK : MonoBehaviour
             // but we no longer shrink the limit intentionally to avoid premature tucking.
             float peelDistance = legExtensionMax * 1.05f; 
 
-            bool overExtended = leg.GetExtension() > peelDistance;
-            
-            // Metachronal peeling: A leg is more likely to detach if the legs in front of it are already detached
+            // SOFT METACHRONAL PEELING: Instead of a hard block, we increase the peel threshold 
+            // of rear legs if their predecessors are still planted. This maintains the front-to-back
+            // preference without 'jamming' the movement if a head-ward leg is stuck.
             int legIdx = System.Array.IndexOf(legs, leg);
-            bool neighborsDetached = true;
+            float peelMultiplier = 1.0f;
             if (legIdx > 0 && userLiftInput > 0.1f)
             {
-                // Is the leg in front of me planted? If so, wait.
-                if (legs[legIdx - 1].isPlanted && legs[legIdx - 1].GetExtension() < peelDistance * 0.9f)
-                    neighborsDetached = false;
+                int sweep = Mathf.Min(legIdx, 4);
+                for (int i = legIdx - 1; i >= legIdx - sweep; i--)
+                {
+                    // For every head-ward neighbor still stable, make this leg 15% harder to peel.
+                    if (legs[i].isPlanted && legs[i].GetExtension() < peelDistance * 0.95f)
+                    {
+                        peelMultiplier += 0.15f;
+                    }
+                }
             }
+            peelDistance *= peelMultiplier;
+            bool overExtended = leg.GetExtension() > peelDistance;
+            bool neighborsDetached = true; // No longer a hard block
 
             // ONLY tuck if we are overExtended AND we have no better place to step to.
             if (leg.isPlanted && !leg.isStepping && overExtended && neighborsDetached)
             {
-                // If we are overExtended but still have a valid target, we should STEP rather than tuck.
-                if (HasValidTarget(leg, false))
+                // REACH-PRIORITY: If we are actively reaching away from a surface, 
+                // we should PREFER to let go rather than stepping back onto the same surface.
+                bool shouldStep = HasValidTarget(leg, false);
+                if (userLiftInput > 0.4f) shouldStep = false; // Force peeling when reaching away.
+
+                if (shouldStep)
                 {
                     StepLeg(leg, false);
                 }
@@ -1094,15 +1112,17 @@ public class CentipedeIK : MonoBehaviour
         float groundedness = (float)totalPlanted / Mathf.Max(1, legs.Length);
 
         // REALISTIC PHYSICS: Linear traction (lift, gravity cancel, propulsion) is strictly grounded.
-        // If zero feet are planted, linearTraction is 0. No floating.
+        // Instead of a soft threshold, we now use a direct linear scale (Efficiency) 
+        // to prevent the 'launching' effect when few legs are touching.
+        float groundedEfficiency = (float)totalPlanted / Mathf.Max(1, legs.Length);
+        
+        // linearTraction still handles the posture/muscle fall-off, but 'Power' scales with efficiency.
         float linearTraction = Mathf.Clamp01(groundedness / Mathf.Max(0.001f, fallThreshold));
         
         // POSTURAL INFLUENCE: Rotation muscle retains a baseline if active input is provided.
         float controlFloor = (smoothedInput.sqrMagnitude > 0.01f) ? minControlRetention : 0.0f;
         float muscleInfluence = Mathf.Clamp(groundedness / Mathf.Max(0.001f, fallThreshold), controlFloor, 1.0f);
 
-        // Alias for the existing code logic
-        float groundingSlowdown = linearTraction; 
 
 
         // Identify the "Influence Group" - only the legs on the Head transform
@@ -1254,7 +1274,8 @@ public class CentipedeIK : MonoBehaviour
             float steeringAway = 1.0f - Mathf.Clamp01(Vector2.Dot(smoothedInput.normalized, avgNormal));
             
             // INCREASED reaching sensitivity: when user moves away from surface, bias significantly towards their stick
-            float alignmentBias = Mathf.Lerp(0.05f, 0.35f, groundedness) * steeringAway; 
+            // Further reduced bias (0.01 - 0.2) to prevent the head from 'snapping' parallel to the wall during a reach.
+            float alignmentBias = Mathf.Lerp(0.01f, 0.20f, groundedness) * steeringAway; 
             
             targetAngle = Mathf.LerpAngle(targetAngle, surfaceAlignmentAngle, alignmentBias); 
             
@@ -1337,7 +1358,9 @@ public class CentipedeIK : MonoBehaviour
         float effectHeight = bodyHeight * Mathf.Lerp(0.2f, 1.0f, confidence);
         float effectLead   = bodyLead   * Mathf.Lerp(0.4f, 1.0f, confidence);
         
-        targetPos += avgNormal * effectHeight;
+        // REACH-BOOST: If we are actively lifting, let the target body height extend further
+        float reachHeightScaler = 1.0f + Mathf.Clamp01(userLiftInput) * 1.5f; 
+        targetPos += avgNormal * effectHeight * reachHeightScaler;
 
         // --- LOCOMOTION ENGINE ---
         
@@ -1347,14 +1370,14 @@ public class CentipedeIK : MonoBehaviour
         float gravityFactor = 1.0f;
         if (groundedness < fallThreshold)
         {
-            gravityFactor = Mathf.Lerp(15.0f, 1.0f, groundingSlowdown);
+            gravityFactor = Mathf.Lerp(15.0f, 1.0f, linearTraction);
         }
         headRb.gravityScale = gravityFactor;
         
         // Fallback Grip: If head is in air, use body segments for propulsion
         float headGrip = (float)planted / Mathf.Max(1, totalHeadLegs);
         float bodyGrip = (float)totalPlanted / legs.Length;
-        float gripFactor = Mathf.Max(headGrip, bodyGrip * 0.5f) * groundingSlowdown;
+        float gripFactor = Mathf.Max(headGrip, bodyGrip * 0.5f) * groundedEfficiency;
 
 
         // 2. Head Rotation (Steering)
@@ -1405,7 +1428,7 @@ public class CentipedeIK : MonoBehaviour
         float liftForceMag = (heightError * liftTraction) - (vertVel * dampScalar);
         if (userLiftInput > 0.1f) liftForceMag = Mathf.Max(0, liftForceMag);
         
-        Vector2 springForce = avgNormal * liftForceMag * groundingSlowdown; 
+        Vector2 springForce = avgNormal * liftForceMag * groundedEfficiency; 
         
         // Add a 'Ground Compression' factor: limit velocity downward if we are already low
         if (heightError < -0.1f && Vector2.Dot(headRb.linearVelocity, avgNormal) < 0)
@@ -1426,14 +1449,15 @@ public class CentipedeIK : MonoBehaviour
 
         // --- AIRPLANE LIFT (PITCH AWAY) ---
         // Apply force AWAY from the current surface normal.
-        // REALISTIC PHYSICS: Linear propulsion and lift are 100% tied to grounding. 
-        // No feet = zero thrust. This prevents flight.
-        Vector2 airplaneLift = currentSurfaceNormal * userLiftInput * liftPotency * headRb.mass * (groundedness > 0 ? groundingSlowdown : 0f);
+        // Wall Reaches: Use linearTraction (threshold based) for head power, so that reaching 
+        // away from a wall feels as authoritative as reaching from a floor even if few legs touch.
+        Vector2 airplaneLift = currentSurfaceNormal * userLiftInput * liftPotency * headRb.mass * (linearTraction);
         
         // REALISTIC PHYSICS: Gravity neutralization requires grounded feet.
-        Vector2 gravNeutralizer = -Physics2D.gravity * headRb.gravityScale * headRb.mass * (groundedness > 0 ? groundingSlowdown : 0f);
+        // Bias towards Head Authority to ensure wall-reaches don't sink.
+        Vector2 gravNeutralizer = -Physics2D.gravity * headRb.gravityScale * headRb.mass * (linearTraction);
         headRb.AddForce(springForce + gravNeutralizer + airplaneLift, ForceMode2D.Force);
-        headRb.AddForceAtPosition(locomotionForce * (groundedness > 0 ? 1.0f : 0f), noseTip, ForceMode2D.Force);
+        headRb.AddForceAtPosition(locomotionForce * (linearTraction), noseTip, ForceMode2D.Force);
 
         // --- Per-Segment suspension to prevent launching & floating ---
         if (usePhysicsSegments && bodySegments != null)
@@ -1467,31 +1491,39 @@ public class CentipedeIK : MonoBehaviour
                         // Local curvature context
                         Vector2 segNormalSum = Vector2.zero;
                         int segPlantedCount = 0;
+                        int segTotalLegs = 0;
                         foreach (var l in legs) {
-                            if (l.isPlanted && l.bodyTransform == leg.bodyTransform) {
-                                segNormalSum += l.plantedNormal;
-                                segPlantedCount++;
+                            if (l.bodyTransform == leg.bodyTransform) {
+                                segTotalLegs++;
+                                if (l.isPlanted) {
+                                    segNormalSum += l.plantedNormal;
+                                    segPlantedCount++;
+                                }
                             }
                         }
                         Vector2 localSegNormal = segPlantedCount > 0 ? segNormalSum.normalized : avgNormal;
-                        float segGrip = segPlantedCount > 1 ? 1.0f : 0.6f;
+                        float localEfficiency = (float)segPlantedCount / Mathf.Max(1, segTotalLegs);
+                        // Local Traction: 50% leg contact (e.g. 1 leg on a 2-leg segment) = 100% traction.
+                        float localTraction = Mathf.Clamp01(localEfficiency / 0.49f);
 
                         // ── SEGMENT PROPULSION (COOPERATION) ──
-                        // Grounded legs push the body in the direction of input
-                        float pushForce = 400f * powerMult * groundingSlowdown;
-                        segRb.AddForce(steeredMovementDir * segRb.mass * pushForce * segGrip, ForceMode2D.Force);
+                        float pushForce = 400f * powerMult * localTraction;
+                        segRb.AddForce(steeredMovementDir * segRb.mass * pushForce, ForceMode2D.Force);
 
                         // Calculate height
+                        float segReachBoost = 1.0f + Mathf.Clamp01(userLiftInput) * 1.5f * (1.0f - progress); 
                         float segCurrentHeight = Vector2.Dot(segRb.position - leg.currentFootPos, localSegNormal);
-                        float segHeightError = bodyHeight - segCurrentHeight;
+                        float segHeightError = (bodyHeight * segReachBoost) - segCurrentHeight;
                         
                         float segVertVel = Vector2.Dot(segRb.linearVelocity, localSegNormal);
                         float segLiftMag = (segHeightError * liftTraction * 0.5f) - (segVertVel * 100f);
-                        segLiftMag *= segRb.mass * segGrip;
-                        segLiftMag = Mathf.Min(segLiftMag, 1500f * segRb.mass); 
-
-                        Vector2 segGravNeutralizer = -Physics2D.gravity * segRb.gravityScale * segRb.mass * (userLiftInput > 0.1 ? 1.0f : segGrip);
-                        segRb.AddForce(localSegNormal * (segLiftMag * groundingSlowdown) + segGravNeutralizer, ForceMode2D.Force);
+                        
+                        // Scale Lift and Neutralization by Local Traction
+                        Vector2 segGravNeutralizer = -Physics2D.gravity * segRb.gravityScale * segRb.mass;
+                        float muscleNeutralization = Mathf.Lerp(1.0f, 0.5f, progress) * userLiftInput;
+                        segGravNeutralizer *= Mathf.Max(localTraction, muscleNeutralization);
+                        
+                        segRb.AddForce(localSegNormal * (segLiftMag * localTraction * segRb.mass) + segGravNeutralizer, ForceMode2D.Force);
                         
                         // Orientation
                         float groundAngle = Mathf.Atan2(localSegNormal.y, localSegNormal.x) * Mathf.Rad2Deg - 90f;
@@ -1505,9 +1537,9 @@ public class CentipedeIK : MonoBehaviour
                         float strainThreshold = maxSegmentBend * 0.4f; 
                         float strainFactor = Mathf.Clamp01((Mathf.Abs(jointStrain) - strainThreshold) / (maxSegmentBend - strainThreshold));
                         
-                        // Blend Stick Influence with Ground Alignment
-                        // If stick is active, and joint is straining, override the ground-alignment to curl the body.
-                        float targetBodyAngle = Mathf.LerpAngle(groundAngle, masterSteerTarget, stickInfluence * strainFactor * muscleInfluence);
+                        // Blend Ahead-Heading with Ground Alignment
+                        // If the segment in front is straining this joint, give in to the bend to maintain the pose flow.
+                        float targetBodyAngle = Mathf.LerpAngle(groundAngle, aheadAngle, strainFactor * muscleInfluence);
                         
                         float angleError = Mathf.DeltaAngle(segRb.rotation, targetBodyAngle);
                         float torqueStrength = 80f * (1.0f + stickInfluence * 2.0f); // Stiffen up when steering
@@ -1521,7 +1553,7 @@ public class CentipedeIK : MonoBehaviour
                         
                         // High-pressure lift for body segments when the head is lifting
                         // MUSCLE: Body segments now actively supporting the head's reach
-                        float muscleArchSupport = userLiftInput * muscleArchForce * segRb.mass * Mathf.Clamp01(1.2f - progress);
+                        float muscleArchSupport = userLiftInput * muscleArchForce * segRb.mass * Mathf.Clamp01(1.2f - progress) * localEfficiency;
                         segRb.AddForce(localSegNormal * muscleArchSupport, ForceMode2D.Force);
                         
                         // NOSE-TENSION: Segments also pull TOWARDS the head to keep the body compact and muscular

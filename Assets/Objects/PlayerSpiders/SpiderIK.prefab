@@ -378,7 +378,7 @@ Transform:
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
   m_LocalPosition: {x: -11.26462, y: -13.68, z: 0.01095961}
   m_LocalScale: {x: 1, y: 1, z: 1}
-  m_ConstrainProportionsScale: 0
+  m_ConstrainProportionsScale: 1
   m_Children:
   - {fileID: 8776981522214217857}
   m_Father: {fileID: 0}
@@ -397,14 +397,16 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   webPrefab: {fileID: 92156152913644233, guid: 87b173134568a4d4996a7bfcef1f4f2f, type: 3}
   webStartPoint: {fileID: 8776981522214217857}
-  maxWebSegments: 300
+  maxWebSegments: 100
   defaultLayer:
     serializedVersion: 2
     m_Bits: 129
-  segmentLength: 3.41
-  overlapRadius: 2.5
+  segmentLength: 1.5
+  overlapRadius: 0.2
   stringId: 0
   webRb: {fileID: 0}
+  maxShootRange: 200
+  tensionFactor: 0.5
 --- !u!114 &8878322093767836848
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -418,6 +420,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::SpiderControllerIK
   solverMode: 0
+  isAI: 0
   legs:
   - {fileID: 62106199079756885}
   - {fileID: 2576760112242310337}
@@ -427,27 +430,33 @@ MonoBehaviour:
   - {fileID: 2944729823283022303}
   activeGait: 0
   autoDetectSide: 1
-  maxDetached: 2
-  legExtensionMax: 10
-  legExtensionMin: 1.5
-  footSpacing: 2
-  minStride: 1
+  maxDetached: 4
+  legExtensionMax: 14
+  legExtensionMin: 5
+  footSpacing: 1
+  minStride: 3
   headSafeArea: 3
   headRb: {fileID: 3187673537877576487}
   bodySmoothing: 10
-  bodyHeight: 4
-  bodyHeightMin: 1
+  bodyLead: 0
+  bodyHeight: 0
+  defaultBodyHeight: 4
+  bodyHeightMin: -10
   bodyHeightMax: 10
-  bodyHeightSpeed: 5
+  bodyHeightSpeed: 10
   rotationSpeed: 5
-  stepCooldown: 0.3
-  walkLean: 3
+  stepCooldown: 0.5
+  stepSpeed: 30
+  stepHeight: 0
   attachableLayers:
     serializedVersion: 2
     m_Bits: 129
   rayCount: 100
-  sightDistance: 15
-  showDebug: 1
+  kneeRayCount: 40
+  sightDistance: 16
+  kneeRayScale: 0.6
+  spiderWeightMult: 5
+  showDebug: 0
   inputDirection: {x: 0, y: 0}
 --- !u!1 &4282771279900100916
 GameObject:
@@ -1590,7 +1599,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 4113319618774104095, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_BodyType
-      value: 1
+      value: 0
       objectReference: {fileID: 0}
     - target: {fileID: 4113319618774104095, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_UseAutoMass
@@ -1737,17 +1746,18 @@ MonoBehaviour:
   foot: {fileID: 1093371968334155664}
   thighLength: 6.8
   shinLength: 6.8
-  isLeftSide: 0
+  isLeftSide: 1
   isPhysicallyRight: 0
   ikTarget: {fileID: 1093371968334155664}
-  stepDuration: 0.2
-  stepHeight: 2
   editorPreview: 0
   currentFootPos: {x: 0, y: 0}
   targetFootPos: {x: 0, y: 0}
   isStepping: 0
+  stepProgress: 0
   isPlanted: 1
   plantedTimer: 999
+  plantedNormal: {x: 0, y: 0}
+  plantedTransform: {fileID: 0}
   shoulderOnThigh: {x: 0, y: 0}
   elbowOnThigh: {x: 0, y: 0}
   elbowOnShin: {x: 0, y: 0}
@@ -1951,7 +1961,7 @@ HingeJoint2D:
   m_BreakAction: 3
   m_AutoConfigureConnectedAnchor: 1
   m_Anchor: {x: 8, y: 0}
-  m_ConnectedAnchor: {x: 0.18414423, y: 0.0621199}
+  m_ConnectedAnchor: {x: 0.18411216, y: 0.062157653}
   m_UseConnectedAnchor: 1
   m_UseMotor: 0
   m_Motor:
@@ -2596,7 +2606,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 4113319618774104095, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_BodyType
-      value: 1
+      value: 0
       objectReference: {fileID: 0}
     - target: {fileID: 4113319618774104095, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_UseAutoMass
@@ -2747,17 +2757,18 @@ MonoBehaviour:
   foot: {fileID: 7442650655851227912}
   thighLength: 3.4060109
   shinLength: 3.9257507
-  isLeftSide: 1
+  isLeftSide: 0
   isPhysicallyRight: 0
   ikTarget: {fileID: 7442650655851227912}
-  stepDuration: 0.2
-  stepHeight: 2
   editorPreview: 0
   currentFootPos: {x: -10.304661, y: -15.28091}
   targetFootPos: {x: 0, y: 0}
   isStepping: 0
+  stepProgress: 0
   isPlanted: 1
   plantedTimer: 999
+  plantedNormal: {x: 0, y: 0}
+  plantedTransform: {fileID: 0}
   shoulderOnThigh: {x: 0, y: 0}
   elbowOnThigh: {x: 0, y: 0}
   elbowOnShin: {x: 0, y: 0}
@@ -2836,7 +2847,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 4113319618774104095, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_BodyType
-      value: 1
+      value: 0
       objectReference: {fileID: 0}
     - target: {fileID: 4113319618774104095, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_UseAutoMass
@@ -2983,17 +2994,18 @@ MonoBehaviour:
   foot: {fileID: 421603500717089379}
   thighLength: 6.8
   shinLength: 6.8
-  isLeftSide: 1
+  isLeftSide: 0
   isPhysicallyRight: 0
   ikTarget: {fileID: 421603500717089379}
-  stepDuration: 0.2
-  stepHeight: 2
   editorPreview: 0
   currentFootPos: {x: 0, y: 0}
   targetFootPos: {x: 0, y: 0}
   isStepping: 0
+  stepProgress: 0
   isPlanted: 1
   plantedTimer: 999
+  plantedNormal: {x: 0, y: 0}
+  plantedTransform: {fileID: 0}
   shoulderOnThigh: {x: 0, y: 0}
   elbowOnThigh: {x: 0, y: 0}
   elbowOnShin: {x: 0, y: 0}
@@ -3072,7 +3084,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 4113319618774104095, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_BodyType
-      value: 1
+      value: 0
       objectReference: {fileID: 0}
     - target: {fileID: 4113319618774104095, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_UseAutoMass
@@ -3219,17 +3231,18 @@ MonoBehaviour:
   foot: {fileID: 6643458689403186195}
   thighLength: 5.6138844
   shinLength: 3.3684013
-  isLeftSide: 0
+  isLeftSide: 1
   isPhysicallyRight: 0
   ikTarget: {fileID: 6643458689403186195}
-  stepDuration: 0.2
-  stepHeight: 2
   editorPreview: 0
   currentFootPos: {x: -4.331859, y: -21.03673}
   targetFootPos: {x: 0, y: 0}
   isStepping: 0
+  stepProgress: 0
   isPlanted: 1
   plantedTimer: 999
+  plantedNormal: {x: 0, y: 0}
+  plantedTransform: {fileID: 0}
   shoulderOnThigh: {x: 0, y: 0}
   elbowOnThigh: {x: 0, y: 0}
   elbowOnShin: {x: 0, y: 0}
@@ -3308,7 +3321,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 4113319618774104095, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_BodyType
-      value: 1
+      value: 0
       objectReference: {fileID: 0}
     - target: {fileID: 4113319618774104095, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_UseAutoMass
@@ -3455,17 +3468,18 @@ MonoBehaviour:
   foot: {fileID: 9071553674481634050}
   thighLength: 6.8
   shinLength: 6.8
-  isLeftSide: 1
+  isLeftSide: 0
   isPhysicallyRight: 0
   ikTarget: {fileID: 9071553674481634050}
-  stepDuration: 0.2
-  stepHeight: 2
   editorPreview: 0
   currentFootPos: {x: 0, y: 0}
   targetFootPos: {x: 0, y: 0}
   isStepping: 0
+  stepProgress: 0
   isPlanted: 1
   plantedTimer: 999
+  plantedNormal: {x: 0, y: 0}
+  plantedTransform: {fileID: 0}
   shoulderOnThigh: {x: 0, y: 0}
   elbowOnThigh: {x: 0, y: 0}
   elbowOnShin: {x: 0, y: 0}
@@ -3798,7 +3812,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 4113319618774104095, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_BodyType
-      value: 1
+      value: 0
       objectReference: {fileID: 0}
     - target: {fileID: 4113319618774104095, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_UseAutoMass
@@ -3945,17 +3959,18 @@ MonoBehaviour:
   foot: {fileID: 2454144349433107292}
   thighLength: 6.8
   shinLength: 6.8
-  isLeftSide: 0
+  isLeftSide: 1
   isPhysicallyRight: 0
   ikTarget: {fileID: 2454144349433107292}
-  stepDuration: 0.2
-  stepHeight: 2
   editorPreview: 0
   currentFootPos: {x: 0, y: 0}
   targetFootPos: {x: 0, y: 0}
   isStepping: 0
+  stepProgress: 0
   isPlanted: 1
   plantedTimer: 999
+  plantedNormal: {x: 0, y: 0}
+  plantedTransform: {fileID: 0}
   shoulderOnThigh: {x: 0, y: 0}
   elbowOnThigh: {x: 0, y: 0}
   elbowOnShin: {x: 0, y: 0}
@@ -4062,7 +4077,7 @@ Rigidbody2D:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 8599888468020921147}
-  m_BodyType: 1
+  m_BodyType: 0
   m_Simulated: 1
   m_UseFullKinematicContacts: 0
   m_UseAutoMass: 0

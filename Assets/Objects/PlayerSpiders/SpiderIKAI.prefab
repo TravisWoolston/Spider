@@ -428,9 +428,12 @@ MonoBehaviour:
   attachableLayers:
     serializedVersion: 2
     m_Bits: 129
-  rayCount: 100
+  rayCount: 30
+  kneeRayCount: 40
   sightDistance: 15
-  showDebug: 1
+  kneeRayScale: 0.6
+  spiderWeightMult: 3
+  showDebug: 0
   inputDirection: {x: 0, y: 0}
 --- !u!114 &2793808374688252997
 MonoBehaviour:
@@ -445,6 +448,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::SpiderPathfinding
   maxIterations: 500
+  webCostMultiplier: 0.5
 --- !u!114 &7169759930916797132
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -458,8 +462,12 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::SpiderAI
   target: {fileID: 0}
-  arrivalDistance: 2
-  pathRecalculationInterval: 1
+  arrivalDistance: 10
+  pathRecalculationInterval: 10
+  isWandering: 1
+  wanderRadius: 20
+  webPreferenceWeight: 5
+  wanderWaitTime: 2
   path: []
 --- !u!1 &4282771279900100916
 GameObject:
@@ -1759,6 +1767,8 @@ MonoBehaviour:
   stepProgress: 0
   isPlanted: 1
   plantedTimer: 999
+  plantedNormal: {x: 0, y: 0}
+  plantedTransform: {fileID: 0}
   shoulderOnThigh: {x: 0, y: 0}
   elbowOnThigh: {x: 0, y: 0}
   elbowOnShin: {x: 0, y: 0}
@@ -2768,6 +2778,8 @@ MonoBehaviour:
   stepProgress: 0
   isPlanted: 1
   plantedTimer: 999
+  plantedNormal: {x: 0, y: 0}
+  plantedTransform: {fileID: 0}
   shoulderOnThigh: {x: 0, y: 0}
   elbowOnThigh: {x: 0, y: 0}
   elbowOnShin: {x: 0, y: 0}
@@ -3003,6 +3015,8 @@ MonoBehaviour:
   stepProgress: 0
   isPlanted: 1
   plantedTimer: 999
+  plantedNormal: {x: 0, y: 0}
+  plantedTransform: {fileID: 0}
   shoulderOnThigh: {x: 0, y: 0}
   elbowOnThigh: {x: 0, y: 0}
   elbowOnShin: {x: 0, y: 0}
@@ -3238,6 +3252,8 @@ MonoBehaviour:
   stepProgress: 0
   isPlanted: 1
   plantedTimer: 999
+  plantedNormal: {x: 0, y: 0}
+  plantedTransform: {fileID: 0}
   shoulderOnThigh: {x: 0, y: 0}
   elbowOnThigh: {x: 0, y: 0}
   elbowOnShin: {x: 0, y: 0}
@@ -3473,6 +3489,8 @@ MonoBehaviour:
   stepProgress: 0
   isPlanted: 1
   plantedTimer: 999
+  plantedNormal: {x: 0, y: 0}
+  plantedTransform: {fileID: 0}
   shoulderOnThigh: {x: 0, y: 0}
   elbowOnThigh: {x: 0, y: 0}
   elbowOnShin: {x: 0, y: 0}
@@ -3962,6 +3980,8 @@ MonoBehaviour:
   stepProgress: 0
   isPlanted: 1
   plantedTimer: 999
+  plantedNormal: {x: 0, y: 0}
+  plantedTransform: {fileID: 0}
   shoulderOnThigh: {x: 0, y: 0}
   elbowOnThigh: {x: 0, y: 0}
   elbowOnShin: {x: 0, y: 0}

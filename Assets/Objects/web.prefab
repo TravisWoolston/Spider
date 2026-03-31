@@ -248,7 +248,7 @@ MonoBehaviour:
   ignoreRadius: 0
   neighbors: []
   maxLightIntensity: 0.1
-  lightOuterRadius: 12
+  lightOuterRadius: 15
   lightInnerRadius: 1
   lightFalloff: 0.9
   pulseDuration: 2.5

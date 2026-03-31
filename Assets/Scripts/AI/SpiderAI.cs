@@ -83,7 +83,7 @@ public class SpiderAI : MonoBehaviour
         float distToGoal = Vector2.Distance(headPos, currentGoal);
 
         // 1. Goal Check
-        if (distToGoal < arrivalDistance)
+        if (distToGoal <= arrivalDistance)
         {
             spiderController.inputDirection = Vector2.zero;
             
@@ -119,7 +119,16 @@ public class SpiderAI : MonoBehaviour
             // If we run out of path, try to recalculate or just move towards goal directly
             if (distToGoal > spiderController.legExtensionMax)
             {
-                CalculateNewPath(currentGoal);
+                if (currentWaypointIndex >= path.Count)
+                {
+                    CalculateNewPath(currentGoal);
+                }
+
+                // Fallback: move directly if pathfinding keeps failing
+                if (path.Count == 0)
+                {
+                    spiderController.inputDirection = (currentGoal - headPos).normalized;
+                }
             }
             else
             {
@@ -130,7 +139,7 @@ public class SpiderAI : MonoBehaviour
 
     void PickWanderTarget()
     {
-        if (GlobalAttachmentManager.globalAttachmentPoints.Count == 0) return;
+        if (GlobalAttachmentManager.TotalPoints == 0) return;
 
         Vector2 headPos = spiderController.headRb.position;
         
@@ -138,9 +147,9 @@ public class SpiderAI : MonoBehaviour
         float totalWeight = 0;
         List<(Vector2 pos, float weight)> weightedPoints = new List<(Vector2, float)>();
         
-        foreach (var point in GlobalAttachmentManager.globalAttachmentPoints)
+        foreach (var point in GlobalAttachmentManager.AllPoints())
         {
-            float dist = Vector2.Distance(headPos, point.point);
+            float dist = Vector2.Distance(headPos, point.Position);
             if (dist > wanderRadius || dist < arrivalDistance) continue;
 
             float weight = 1.0f;
@@ -150,7 +159,7 @@ public class SpiderAI : MonoBehaviour
             float distRatio = dist / wanderRadius;
             weight *= (distRatio * distRatio); 
 
-            weightedPoints.Add((point.point, weight));
+            weightedPoints.Add((point.Position, weight));
             totalWeight += weight;
         }
 
@@ -160,7 +169,14 @@ public class SpiderAI : MonoBehaviour
             var allPoints = GlobalAttachmentManager.GetPointsInRange(headPos, wanderRadius);
             if (allPoints.Count > 0)
             {
-                wanderTarget = allPoints[Random.Range(0, allPoints.Count)].point;
+                wanderTarget = allPoints[Random.Range(0, allPoints.Count)].Position;
+                CalculateNewPath(wanderTarget.Value);
+            }
+            else
+            {
+                // Hard-random fallback in case no attachment points were found in range
+                Vector2 randomOffset = Random.insideUnitCircle * wanderRadius;
+                wanderTarget = headPos + randomOffset;
                 CalculateNewPath(wanderTarget.Value);
             }
             return;
@@ -186,6 +202,12 @@ public class SpiderAI : MonoBehaviour
         {
             path = spiderPathfinding.CalculatePath(spiderController.headRb.position, goalPos);
             currentWaypointIndex = 0;
+            
+            if (path.Count == 0 && isWandering && target == null)
+            {
+                // If pathfinding failed, clear wander target to pick a new one soon
+                wanderTarget = null;
+            }
         }
     }
 
@@ -207,6 +229,8 @@ public class SpiderAI : MonoBehaviour
 
     void OnDrawGizmos()
     {
+        if (GameSetup.Instance == null || !GameSetup.Instance.showAIDebug) return;
+
         if (path != null && path.Count > 0)
         {
             Gizmos.color = Color.cyan;

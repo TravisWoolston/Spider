@@ -74,19 +74,19 @@ public class SpiderPathfinding : MonoBehaviour
             
             foreach (var point in pointsNear)
             {
-                if (closedSet.Contains(point.point)) continue;
+                if (closedSet.Contains(point.Position)) continue;
 
-                float stepDist = Vector2.Distance(currentNode.Position, point.point);
+                float stepDist = Vector2.Distance(currentNode.Position, point.Position);
                 if (point.webTransform != null) stepDist *= webCostMultiplier;
                 
                 float gCost = currentNode.G + stepDist;
-                float hCost = Vector2.Distance(point.point, targetPosition);
+                float hCost = Vector2.Distance(point.Position, targetPosition);
 
                 // Check if we already have this point in open list
                 Node existingNode = null;
                 foreach(var n in openList)
                 {
-                    if (n.Position == point.point)
+                    if (n.Position == point.Position)
                     {
                         existingNode = n;
                         break;
@@ -103,7 +103,7 @@ public class SpiderPathfinding : MonoBehaviour
                 }
                 else
                 {
-                    openList.Add(new Node(point.point, currentNode, gCost, hCost));
+                    openList.Add(new Node(point.Position, currentNode, gCost, hCost));
                 }
             }
         }

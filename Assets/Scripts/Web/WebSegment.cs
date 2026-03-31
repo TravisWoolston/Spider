@@ -80,6 +80,17 @@ public class WebSegment : MonoBehaviour
     private static int currentPulseId = 0;
     private int lastPulseId = -1;
     public List<WebSegment> neighbors = new List<WebSegment>();
+    [HideInInspector] public int lastSensedFrame = -1;
+
+    public void MarkSensed(int frame)
+    {
+        if (lastSensedFrame == frame) return;
+        lastSensedFrame = frame;
+        foreach (var neighbor in neighbors)
+        {
+            if (neighbor != null) neighbor.MarkSensed(frame);
+        }
+    }
 
     private Light2D pulseLight;
     public float maxLightIntensity = 20.0f; // Lowered to prevent yellowish saturation
@@ -142,27 +153,8 @@ public class WebSegment : MonoBehaviour
     public void TriggerPulse()
     {
         currentPulseId++;
-        Vector2 sourcePos = (Vector2)transform.position;
-
-        // Perform a spatial non-alloc query to find all web segments in range
-        int count = Physics2D.OverlapCircleNonAlloc(sourcePos, spatialPulseRadius, pulseCollidersBuffer, LayerMask.GetMask("Web"));
-        
-        for (int i = 0; i < count; i++)
-        {
-            var col = pulseCollidersBuffer[i];
-            var segment = col.GetComponent<WebSegment>();
-            if (segment != null)
-            {
-                float dist = Vector2.Distance(sourcePos, (Vector2)segment.transform.position);
-                float strength = Mathf.Clamp01(1f - (dist / spatialPulseRadius));
-                
-                // Use a non-linear falloff for a more natural look
-                strength = Mathf.Pow(strength, 1.2f);
-                
-                // Pulse immediately without propagation (since we've already found everyone spatially)
-                segment.Pulse(strength, currentPulseId, false);
-            }
-        }
+        // Graph-based propagation only (connected web networks)
+        Pulse(1.0f, currentPulseId, true);
     }
 
     public void Pulse(float strength, int pulseId, bool propagate = true)
@@ -220,7 +212,9 @@ public class WebSegment : MonoBehaviour
             if (pulseLight != null)
             {
                 pulseLight.color = Color.white;
-                pulseLight.intensity = maxLightIntensity * currentStrength;
+                // Only visible if the player is currently touching this connected web network
+                bool playerSensing = (lastSensedFrame == Time.frameCount);
+                pulseLight.intensity = playerSensing ? maxLightIntensity * currentStrength : 0;
             }
 
             if (propagate && elapsed >= propagationDelay && propagationDelay > 0)

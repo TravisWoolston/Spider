@@ -292,6 +292,9 @@ public class CentipedeIK : MonoBehaviour
                 leg.plantedTransform = hit.collider.transform;
                 // Store local offset so SyncToSurface works on the first frame
                 leg.plantedLocalPos = hit.collider.transform.InverseTransformPoint(hit.point);
+
+                // Store initial points so AI can wander
+                GlobalAttachmentManager.StoreAttachmentPoint(hit.point, hit.normal, hit.collider.gameObject.layer == LayerMask.NameToLayer("Web") ? hit.collider.transform : null);
             }
         }
     }
@@ -1519,9 +1522,13 @@ public class CentipedeIK : MonoBehaviour
                         float segLiftMag = (segHeightError * liftTraction * 0.5f) - (segVertVel * 100f);
                         
                         // Scale Lift and Neutralization by Local Traction
+                        // Muscle Lift: Only neutralize gravity if we are grounded OR we are a front segment being pulled by the head
+                        // We now use the Head's linearTraction to allow 'parking' the head in a raised pose. 
+                        // If the centipede is grounded anywhere (linearTraction > 0), trailing segments stay neutral.
+                        float muscleNeutralization = Mathf.Lerp(1.0f, 0.5f, progress) * linearTraction;
+                        float tractionNeutralization = localTraction;
                         Vector2 segGravNeutralizer = -Physics2D.gravity * segRb.gravityScale * segRb.mass;
-                        float muscleNeutralization = Mathf.Lerp(1.0f, 0.5f, progress) * userLiftInput;
-                        segGravNeutralizer *= Mathf.Max(localTraction, muscleNeutralization);
+                        segGravNeutralizer *= Mathf.Max(tractionNeutralization, muscleNeutralization);
                         
                         segRb.AddForce(localSegNormal * (segLiftMag * localTraction * segRb.mass) + segGravNeutralizer, ForceMode2D.Force);
                         

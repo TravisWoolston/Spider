@@ -173,7 +173,7 @@ SpriteRenderer:
   m_GlobalIlluminationMeshLod: 0
   m_SortingLayerID: 0
   m_SortingLayer: 0
-  m_SortingOrder: 0
+  m_SortingOrder: 2
   m_MaskInteraction: 0
   m_Sprite: {fileID: 21300000, guid: 5f5b65ea7de475146a7ef006e5a01784, type: 3}
   m_Color: {r: 1, g: 1, b: 1, a: 1}
@@ -253,6 +253,7 @@ GameObject:
   - component: {fileID: 6295327473389166037}
   - component: {fileID: 4702881797555284142}
   - component: {fileID: 1528036009943710271}
+  - component: {fileID: 535028025563451163}
   m_Layer: 31
   m_Name: centipede body
   m_TagString: Untagged
@@ -323,7 +324,7 @@ SpriteRenderer:
   m_GlobalIlluminationMeshLod: 0
   m_SortingLayerID: 0
   m_SortingLayer: 0
-  m_SortingOrder: 0
+  m_SortingOrder: 1
   m_MaskInteraction: 0
   m_Sprite: {fileID: 21300000, guid: 04f6559409c495c40a11dc2085e65b0c, type: 3}
   m_Color: {r: 1, g: 1, b: 1, a: 1}
@@ -534,7 +535,9 @@ MonoBehaviour:
   foot: {fileID: 3666371023306332380}
   thighLength: 6.8
   shinLength: 6.8
-  flipKneeBend: 1
+  isLeftSide: 0
+  isPhysicallyRight: 0
+  ikTarget: {fileID: 0}
   editorPreview: 0
   currentFootPos: {x: 0, y: 0}
   targetFootPos: {x: 0, y: 0}
@@ -544,6 +547,7 @@ MonoBehaviour:
   plantedTimer: 0
   plantedNormal: {x: 0, y: 0}
   plantedTransform: {fileID: 0}
+  plantedLocalPos: {x: 0, y: 0}
   shoulderOnThigh: {x: 0, y: 0}
   elbowOnThigh: {x: 0, y: 0}
   elbowOnShin: {x: 0, y: 0}
@@ -577,6 +581,59 @@ HingeJoint2D:
   m_AngleLimits:
     m_LowerAngle: -12
     m_UpperAngle: 12
+--- !u!114 &535028025563451163
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 6295327473389166032}
+  m_Enabled: 0
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 7db70e0ea77f5ac47a8f4565a9406397, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Unity.RenderPipelines.Universal.2D.Runtime::UnityEngine.Rendering.Universal.ShadowCaster2D
+  m_ShadowGroup: 0
+  m_Priority: 1
+  m_ComponentVersion: 5
+  m_HasRenderer: 1
+  m_UseRendererSilhouette: 1
+  m_CastsShadows: 1
+  m_SelfShadows: 0
+  m_AlphaCutoff: 0.1
+  m_ApplyToSortingLayers: 00000000
+  m_ShapePath:
+  - {x: -1.9949989, y: -3.7750015, z: 0}
+  - {x: -1.9949989, y: 3.7749996, z: 0}
+  - {x: 1.9949989, y: 3.7749996, z: 0}
+  - {x: 1.9949989, y: -3.7750015, z: 0}
+  m_ShapePathHash: 0
+  m_InstanceId: 0
+  m_ShadowShape2DComponent: {fileID: 6295327473389166043}
+  m_ShadowShape2DProvider:
+    rid: 2095772949686779988
+  m_ShadowCastingSource: 2
+  m_ShadowMesh:
+    m_Mesh: {fileID: 0}
+    m_LocalBounds:
+      m_Center: {x: 0, y: 0, z: 0}
+      m_Extent: {x: 1.894989, y: 3.6749878, z: 0}
+    m_EdgeProcessing: 1
+    m_TrimEdge: 0.1
+    m_FlipX: 0
+    m_FlipY: 0
+    m_InitialTrim: 0
+  m_CastingOption: 1
+  m_PreviousTrimEdge: 0.1
+  m_PreviousEdgeProcessing: 1
+  m_PreviousShadowCastingSource: 2
+  m_PreviousShadowShape2DSource: {fileID: 6295327473389166043}
+  references:
+    version: 2
+    RefIds:
+    - rid: 2095772949686779988
+      type: {class: ShadowShape2DProvider_SpriteRenderer, ns: UnityEngine.Rendering.Universal, asm: Unity.RenderPipelines.Universal.2D.Runtime}
+      data: 
 --- !u!1 &6295327473408672625
 GameObject:
   m_ObjectHideFlags: 0
@@ -661,7 +718,7 @@ SpriteRenderer:
   m_GlobalIlluminationMeshLod: 0
   m_SortingLayerID: 0
   m_SortingLayer: 0
-  m_SortingOrder: 0
+  m_SortingOrder: 3
   m_MaskInteraction: 0
   m_Sprite: {fileID: 21300000, guid: 1200cff8df2526e4ea44f0fe13a37aee, type: 3}
   m_Color: {r: 1, g: 1, b: 1, a: 1}

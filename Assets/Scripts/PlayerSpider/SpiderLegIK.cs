@@ -311,6 +311,13 @@ public class SpiderLegIK : MonoBehaviour
             }
         }
 
+        // Web Pulse Illumination: Trigger pulse when targeting a web
+        if (col != null)
+        {
+            var web = col.GetComponent<WebSegment>();
+            if (web != null) web.TriggerPulse();
+        }
+
         currentStepTarget = worldTarget;
         currentStepNormal = normal;
         plantedNormal = normal;

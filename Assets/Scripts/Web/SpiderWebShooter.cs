@@ -132,7 +132,7 @@ public class SpiderWebShooter : MonoBehaviour
             {
                 // First segment (at the target) attaches to the surface
                 if (hit.collider != null) ws.ForceAttachStart(hit.collider, hit.point);
-                else ws.CheckCurrentContact(); // Miss case: try to anchor to whatever is there
+                else ws.CheckCurrentContact(); 
             }
 
             currentSpawnPos += backDir * segmentLength;
@@ -301,6 +301,19 @@ public class SpiderWebShooter : MonoBehaviour
             var ws = lastSegment.GetComponent<WebSegment>();
             if (finalAnchor != null) ws.ForceAttachEnd(finalAnchor, finalPoint);
             else ws.CheckCurrentContact();
+
+            // --- AI NAVIGATION ---
+            // Now that the web is finalized, register all segments sparsely for AI navigation.
+            // This prevents AI from trying to 'catch' the web while it's still being shot.
+            WebSegment[] allSegments = activeWebString.GetComponentsInChildren<WebSegment>();
+            for (int i = 0; i < allSegments.Length; i++)
+            {
+                if (i == 0 || i == allSegments.Length - 1 || i % 8 == 0)
+                {
+                    var seg = allSegments[i];
+                    GlobalAttachmentManager.StoreAttachmentPoint(seg.transform.position, seg.transform.up, seg.transform, 8.0f);
+                }
+            }
         }
 
         isHoldingWeb = false;

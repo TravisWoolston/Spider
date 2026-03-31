@@ -51,6 +51,12 @@ public class SpiderControllerIK : MonoBehaviour
     [Header("Debug")]
     public bool showDebug = true;
 
+    [Header("Digging")]
+    public bool isDigging = false;
+    public float digSpeed = 8f;
+    private SpiderLegIK[] diggingLegs;
+    private float digCycle = 0f;
+
     // ── Runtime state ──────────────────────────────────────────
     private float targetBodyHeight = 0f;
     [HideInInspector] public Vector2 inputDirection;
@@ -119,6 +125,7 @@ public class SpiderControllerIK : MonoBehaviour
 
         PlantAllFeet();
         CaptureRestingPose();
+        InitializeDigging();
 
         foreach (var leg in legs)
             leg.Solve();
@@ -151,6 +158,9 @@ public class SpiderControllerIK : MonoBehaviour
                 leg.targetFootPos  = hit.point;
                 leg.plantedNormal  = hit.normal;
                 leg.isPlanted = true;
+
+                // Store initial points so AI can wander
+                GlobalAttachmentManager.StoreAttachmentPoint(hit.point, hit.normal, hit.collider.gameObject.layer == LayerMask.NameToLayer("Web") ? hit.collider.transform : null);
             }
         }
     }
@@ -168,8 +178,22 @@ public class SpiderControllerIK : MonoBehaviour
         foreach (var leg in legs)
             if (leg.isPlanted) leg.plantedTimer += Time.deltaTime;
         
+        if (isDigging) HandleDigging();
         ProcessGait();
         HandleWebManipulation();
+
+        // --- Web Sensing (Player Only) ---
+        if (!isAI)
+        {
+            foreach (var leg in legs)
+            {
+                if (leg.isPlanted && leg.plantedTransform != null)
+                {
+                    var ws = leg.plantedTransform.GetComponent<WebSegment>();
+                    if (ws != null) ws.MarkSensed(Time.frameCount);
+                }
+            }
+        }
 
         // Reactive Mid-Step Adjustment: Update legs currently in flight
         foreach (var leg in legs)
@@ -220,7 +244,8 @@ public class SpiderControllerIK : MonoBehaviour
             float heightInput = 0f;
             if (Input.GetKey(KeyCode.E) || Input.GetKey(KeyCode.LeftShift)) heightInput += 1f;
             if (Input.GetKey(KeyCode.Q) || Input.GetKey(KeyCode.LeftControl)) heightInput -= 1f;
-            if (Input.GetKeyDown(KeyCode.R)) targetBodyHeight = defaultBodyHeight;
+            if (Input.GetKeyDown(KeyCode.R)) isDigging = !isDigging;
+            
             targetBodyHeight += heightInput * bodyHeightSpeed * Time.deltaTime;
         }
 
@@ -248,8 +273,11 @@ public class SpiderControllerIK : MonoBehaviour
         }
 
         // Clamp height: Prevent negative height if on solid ground
-        float minHeight = groundFactor > 0.1f ? 0.2f : bodyHeightMin;
-        targetBodyHeight = Mathf.Clamp(targetBodyHeight, minHeight, bodyHeightMax);
+        float clampMin = groundFactor > 0.1f ? 0.2f : bodyHeightMin;
+        
+        if (isDigging) targetBodyHeight = bodyHeightMin; // Hunker down when digging
+
+        targetBodyHeight = Mathf.Clamp(targetBodyHeight, clampMin, bodyHeightMax);
         bodyHeight = Mathf.MoveTowards(bodyHeight, targetBodyHeight, bodyHeightSpeed * Time.deltaTime);
     }
 
@@ -305,9 +333,6 @@ public class SpiderControllerIK : MonoBehaviour
                     if (localX < 0) leftPoints.Add(ap);
                     else            rightPoints.Add(ap);
                     
-                    // Store in global manager for AI wandering
-                    GlobalAttachmentManager.StoreAttachmentPoint(hit.point, hit.normal, hit.collider.gameObject.layer == webLayer ? hit.collider.transform : null);
-                    
                     // Stop evaluating this ray ONLY if we hit a solid surface.
                     // If it's a web, keep looking for more web or ground behind it.
                     if (hit.collider.gameObject.layer != webLayer)
@@ -357,9 +382,6 @@ public class SpiderControllerIK : MonoBehaviour
                         var ap = new AttachmentPoint(hit.point, hit.normal, hit.collider);
                         if (localX < 0) leftPoints.Add(ap);
                         else            rightPoints.Add(ap);
-                        
-                        // Store in global manager for AI wandering
-                        GlobalAttachmentManager.StoreAttachmentPoint(hit.point, hit.normal, isWeb ? hit.collider.transform : null);
                     }
                 }
             }
@@ -426,6 +448,8 @@ public class SpiderControllerIK : MonoBehaviour
         foreach (var leg in legs)
         {
             if (!leg.isPlanted || leg.isStepping) continue;
+            if (isDigging && System.Array.IndexOf(diggingLegs, leg) != -1) continue;
+            
             if (leg.GetExtension() > legExtensionMax * 1.05f) // Small buffer
             {
                 if (HasValidTarget(leg))
@@ -455,6 +479,7 @@ public class SpiderControllerIK : MonoBehaviour
         foreach (var leg in legs)
         {
             if (!leg.isPlanted || leg.isStepping) continue;
+            if (isDigging && System.Array.IndexOf(diggingLegs, leg) != -1) continue;
 
             if (leg.isPhysicallyRight && detachedR >= Mathf.CeilToInt(maxDetached / 2f)) continue;
             if (!leg.isPhysicallyRight && detachedL >= Mathf.CeilToInt(maxDetached / 2f)) continue;
@@ -483,6 +508,14 @@ public class SpiderControllerIK : MonoBehaviour
         if (DetachedCount() >= maxDetached) return;
 
         var leg = legs[nextLegIndex];
+        
+        // Skip digging legs
+        if (isDigging && System.Array.IndexOf(diggingLegs, leg) != -1)
+        {
+            nextLegIndex = (nextLegIndex + 1) % legs.Length;
+            return;
+        }
+
         if (leg.isPlanted && !leg.isStepping && Urgency(leg) > 1f)
         {
             StepLeg(leg);
@@ -703,6 +736,76 @@ public class SpiderControllerIK : MonoBehaviour
                 return true;
         }
         return false;
+    }
+
+    // ───────────────────────────────────────────────────────────
+    //  Digging Routine
+    // ───────────────────────────────────────────────────────────
+    
+    void InitializeDigging()
+    {
+        if (legs != null && legs.Length >= 2)
+        {
+            // Find the two frontmost legs (highest local Y)
+            var sortedLegs = new List<SpiderLegIK>(legs);
+            sortedLegs.Sort((a, b) => {
+                Vector2 anchorA = a.bodyTransform != null ? (Vector2)a.bodyTransform.TransformPoint(a.bodyAnchor) : (Vector2)a.transform.position;
+                Vector2 anchorB = b.bodyTransform != null ? (Vector2)b.bodyTransform.TransformPoint(b.bodyAnchor) : (Vector2)b.transform.position;
+                float yA = headT.InverseTransformPoint(anchorA).y;
+                float yB = headT.InverseTransformPoint(anchorB).y;
+                return yB.CompareTo(yA);
+            });
+            diggingLegs = new SpiderLegIK[] { sortedLegs[0], sortedLegs[1] };
+        }
+    }
+
+    void HandleDigging()
+    {
+        if (diggingLegs == null || diggingLegs.Length == 0) return;
+
+        digCycle += Time.deltaTime * digSpeed;
+        Vector2 digDir = smoothedInput.sqrMagnitude > 0.1f ? smoothedInput.normalized : (Vector2)headT.up;
+
+        for (int i = 0; i < diggingLegs.Length; i++)
+        {
+            var leg = diggingLegs[i];
+            
+            // Cancel stepper if they are stepping when dig triggers
+            if (leg.isStepping)
+            {
+                leg.isStepping = false;
+                leg.stepProgress = 0f;
+            }
+
+            // Offset cycles so legs alternate scraping
+            float localCycle = (digCycle + (i * Mathf.PI)) % (Mathf.PI * 2);
+            
+            int idx = System.Array.IndexOf(legs, leg);
+            float maxReach = leg.thighLength + leg.shinLength;
+            
+            // Anchor scraping loop slightly ahead of the shoulder
+            Vector2 shoulderPos = (Vector2)headT.TransformPoint(restingFootOffsets[idx]);
+            Vector2 basePoint = shoulderPos + digDir * (maxReach * 0.6f);
+
+            // Phase values 
+            float forwardExt = Mathf.Cos(localCycle); // 1 to -1 
+            float verticalExt = Mathf.Sin(localCycle); 
+
+            // Create an oval shaped animation (reach forward in air, pull backward against ground)
+            Vector2 pullOffset = digDir * (forwardExt * maxReach * 0.4f);
+            Vector2 liftOffset = (verticalExt > 0) ? (Vector2)headT.up * verticalExt * stepHeight : Vector2.zero; // Up relative to spider
+
+            leg.currentFootPos = basePoint + pullOffset + liftOffset;
+            leg.targetFootPos = leg.currentFootPos;
+            leg.isPlanted = verticalExt <= 0; // Considered planted when scraping
+
+            // Hook for Terrain Destruction / SFX
+            if (verticalExt <= 0 && verticalExt > -0.2f * digSpeed * Time.deltaTime)
+            {
+                // This triggers at the start of the "scrape" backward
+                // TODO: Instantiate physical dirt chunk, emit particle, or call Terrain.Mine(leg.currentFootPos) here.
+            }
+        }
     }
 
     // ───────────────────────────────────────────────────────────

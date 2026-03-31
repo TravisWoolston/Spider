@@ -38,7 +38,6 @@ public class CentipedeAI : MonoBehaviour
     public float bodyLengthReachFactor = 0.95f;
 
     [Header("Debug")]
-    public bool showPathDebug = true;
     public LayerMask obstacleLayers;
 
     private CentipedeIK centipedeIK;
@@ -174,7 +173,17 @@ public class CentipedeAI : MonoBehaviour
             // If we run out of path, try to recalculate or just move towards goal directly
             if (distToGoal > centipedeIK.legExtensionMax)
             {
-                CalculateNewPath(currentGoal);
+                if (currentWaypointIndex >= (path != null ? path.Count : 0))
+                {
+                    // If at the end of the path and still far, recalculate
+                    CalculateNewPath(currentGoal);
+                }
+                
+                // Fallback attempt to move directly toward goal if path is failing
+                if (path == null || path.Count == 0)
+                {
+                    centipedeIK.inputDirection = (currentGoal - headPos).normalized;
+                }
             }
             else
             {
@@ -185,7 +194,12 @@ public class CentipedeAI : MonoBehaviour
 
     void PickWanderTarget()
     {
-        if (GlobalAttachmentManager.globalAttachmentPoints.Count == 0) return;
+        bool showDebug = GameSetup.Instance != null && GameSetup.Instance.showAIDebug;
+        if (GlobalAttachmentManager.TotalPoints == 0)
+        {
+            if (showDebug) Debug.LogWarning("[CentipedeAI] Still waiting for GlobalAttachmentManager points...");
+            return;
+        }
 
         Vector2 headPos = centipedeIK.headRb != null ? (Vector2)centipedeIK.headRb.position : (Vector2)transform.position;
         
@@ -193,9 +207,9 @@ public class CentipedeAI : MonoBehaviour
         float totalWeight = 0;
         List<(Vector2 pos, float weight)> weightedPoints = new List<(Vector2, float)>();
         
-        foreach (var point in GlobalAttachmentManager.globalAttachmentPoints)
+        foreach (var point in GlobalAttachmentManager.AllPoints())
         {
-            float dist = Vector2.Distance(headPos, point.point);
+            float dist = Vector2.Distance(headPos, point.Position);
             if (dist > wanderRadius || dist < arrivalDistance) continue;
 
             float weight = 1.0f;
@@ -205,16 +219,26 @@ public class CentipedeAI : MonoBehaviour
             float distRatio = dist / wanderRadius;
             weight *= (distRatio * distRatio); 
 
-            weightedPoints.Add((point.point, weight));
+            weightedPoints.Add((point.Position, weight));
             totalWeight += weight;
         }
 
         if (weightedPoints.Count == 0)
         {
+            // Fallback: Pick any point in range if no weighted points found
             var allPoints = GlobalAttachmentManager.GetPointsInRange(headPos, wanderRadius);
             if (allPoints.Count > 0)
             {
-                wanderTarget = allPoints[Random.Range(0, allPoints.Count)].point;
+                wanderTarget = allPoints[Random.Range(0, allPoints.Count)].Position;
+                CalculateNewPath(wanderTarget.Value);
+                if (showDebug) Debug.Log($"[CentipedeAI] Picking random wander target: {wanderTarget.Value}");
+            }
+            else
+            {
+                if (showDebug) Debug.LogWarning("[CentipedeAI] No points found in range picking random point in radius as target.");
+                // Hard-random fallback in case no attachment points were found in range
+                Vector2 randomOffset = Random.insideUnitCircle * wanderRadius;
+                wanderTarget = headPos + randomOffset;
                 CalculateNewPath(wanderTarget.Value);
             }
             return;
@@ -229,6 +253,7 @@ public class CentipedeAI : MonoBehaviour
             {
                 wanderTarget = wp.pos;
                 CalculateNewPath(wanderTarget.Value);
+                if (showDebug) Debug.Log($"[CentipedeAI] Picked weighted wander target: {wanderTarget.Value}");
                 break;
             }
         }
@@ -239,6 +264,19 @@ public class CentipedeAI : MonoBehaviour
         Vector2 startPos = centipedeIK.headRb != null ? (Vector2)centipedeIK.headRb.position : (Vector2)transform.position;
         path = InternalCalculatePath(startPos, goalPos);
         currentWaypointIndex = 0;
+
+        bool showDebug = GameSetup.Instance != null && GameSetup.Instance.showAIDebug;
+
+        if (path == null || path.Count == 0)
+        {
+            if (showDebug) Debug.LogWarning($"[CentipedeAI] Pathfinding failed to: {goalPos}");
+            // Optional: immediately pick a new wander target in the next frame
+            if (isWandering && target == null) wanderTarget = null;
+        }
+        else
+        {
+            if (showDebug) Debug.Log($"[CentipedeAI] Path found with {path.Count} waypoints.");
+        }
     }
 
     private List<Vector2> InternalCalculatePath(Vector2 startPosition, Vector2 targetPosition)
@@ -254,7 +292,12 @@ public class CentipedeAI : MonoBehaviour
         float reach = bodyLength * bodyLengthReachFactor;
         if (reach <= 0) reach = 5f; // Fallback
 
-        PathNode startNode = new PathNode(startPosition, null, 0, Vector2.Distance(startPosition, targetPosition));
+        // Find initial normal for start position (closest surface normal)
+        Vector2 startNormal = Vector2.up;
+        RaycastHit2D hit = Physics2D.Raycast(startPosition, -centipedeIK.headRb.transform.up, 2f, obstacleLayers);
+        if (hit.collider != null) startNormal = hit.normal;
+
+        PathNode startNode = new PathNode(startPosition, startNormal, null, 0, Vector2.Distance(startPosition, targetPosition));
         openList.Add(startNode);
 
         int iterations = 0;
@@ -287,53 +330,33 @@ public class CentipedeAI : MonoBehaviour
             
             foreach (var point in pointsNear)
             {
-                if (closedSet.Contains(point.point)) continue;
+                if (closedSet.Contains(point.Position)) continue;
 
-                float stepDist = Vector2.Distance(currentNode.Position, point.point);
+                float stepDist = Vector2.Distance(currentNode.Position, point.Position);
                 
                 // --- OBSTRUCTION CHECK ---
-                // To prevent the centipede from bridging directly through a solid wall,
-                // we perform a Raycast between the nodes.
-                // We disable 'queriesStartInColliders' and shorten the ray slightly 
-                // to avoid hitting the exact start and end surfaces we are standing on.
+                // We use a Linecast shifted slightly away from the surfaces to check for blocking geometry.
+                Vector2 rayStart = currentNode.Position + currentNode.Normal * 0.2f;
+                Vector2 rayEnd = point.Position + point.normal * 0.2f;
                 
-                Vector2 dir = (point.point - currentNode.Position);
-                float dist = dir.magnitude;
-                if (dist > 0.1f)
-                {
-                    bool oldStartInColliders = Physics2D.queriesStartInColliders;
-                    Physics2D.queriesStartInColliders = false;
-                    
-                    // We check slightly shorter than the full distance to avoid the far-end surface
-                    RaycastHit2D obstruction = Physics2D.Raycast(currentNode.Position, dir.normalized, dist * 0.95f, obstacleLayers);
-                    
-                    Physics2D.queriesStartInColliders = oldStartInColliders;
+                // We also check with a small width to ensure the centipede body can pass
+                RaycastHit2D obstruction = Physics2D.CircleCast(rayStart, 0.2f, (rayEnd - rayStart).normalized, Vector2.Distance(rayStart, rayEnd), obstacleLayers);
 
-                    if (obstruction.collider != null)
-                    {
-                        continue; // Path blocked by solid geometry!
-                    }
+                if (obstruction.collider != null)
+                {
+                    continue; // Path blocked by solid geometry!
                 }
 
                 // Weighting logic
-                float weight = stepDist;
-                if (point.webTransform != null) weight *= webCostMultiplier;
+                if (point.webTransform != null) stepDist *= webCostMultiplier;
                 
-                // Check if this is a "bridging" step versus a "crawling" step
-                bool isGap = stepDist > centipedeIK.legExtensionMax * 1.5f;
-                if (isGap)
-                {
-                    // Add a small penalty for bridging to prefer crawling when possible
-                    weight *= 1.2f; 
-                }
-
-                float gCost = currentNode.G + weight;
-                float hCost = Vector2.Distance(point.point, targetPosition);
+                float gCost = currentNode.G + stepDist;
+                float hCost = Vector2.Distance(point.Position, targetPosition);
 
                 PathNode existingNode = null;
                 foreach(var n in openList)
                 {
-                    if (n.Position == point.point)
+                    if (n.Position == point.Position)
                     {
                         existingNode = n;
                         break;
@@ -350,7 +373,7 @@ public class CentipedeAI : MonoBehaviour
                 }
                 else
                 {
-                    openList.Add(new PathNode(point.point, currentNode, gCost, hCost));
+                    openList.Add(new PathNode(point.Position, point.normal, currentNode, gCost, hCost));
                 }
             }
         }
@@ -390,14 +413,16 @@ public class CentipedeAI : MonoBehaviour
     private class PathNode
     {
         public Vector2 Position;
+        public Vector2 Normal;
         public PathNode Parent;
         public float G;
         public float H;
         public float F => G + H;
 
-        public PathNode(Vector2 pos, PathNode parent, float g, float h)
+        public PathNode(Vector2 pos, Vector2 normal, PathNode parent, float g, float h)
         {
             Position = pos;
+            Normal = normal;
             Parent = parent;
             G = g;
             H = h;
@@ -406,7 +431,7 @@ public class CentipedeAI : MonoBehaviour
 
     void OnDrawGizmos()
     {
-        if (!showPathDebug) return;
+        if (GameSetup.Instance == null || !GameSetup.Instance.showAIDebug) return;
 
         if (path != null && path.Count > 0)
         {

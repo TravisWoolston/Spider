@@ -4,7 +4,7 @@ using System.Collections.Generic;
 public class SpiderControllerIK : MonoBehaviour
 {
     // ── Enums ──────────────────────────────────────────────────
-    public enum GaitType   { Urgency, Alternate }
+    public enum GaitType { Urgency, Alternate }
     public enum SolverMode { Analytical, LimbSolver }
 
     // ── Inspector ──────────────────────────────────────────────
@@ -15,66 +15,77 @@ public class SpiderControllerIK : MonoBehaviour
     [Header("Legs")]
     public SpiderLegIK[] legs;
     public GaitType activeGait = GaitType.Urgency;
-    public bool   autoDetectSide = true;
-    public int   maxDetached    = 2;
+    public bool autoDetectSide = true;
+    public int maxDetached = 2;
     public float legExtensionMax = 10f;
     public float legExtensionMin = 1.5f;
     public float footSpacing = 2f;
     public float minStride = 1f;
-    public float headSafeArea  = 3f;
+    public float headSafeArea = 3f;
 
     [Header("Body")]
     public Rigidbody2D headRb;
-    public float bodySmoothing  = 10f;
-    public float bodyLead       = 2f;
-    public float bodyHeight     = 0f;
+    public float bodySmoothing = 10f;
+    public float bodyLead = 2f;
+    public float bodyHeight = 0f;
     public float defaultBodyHeight = 0f;
-    public float bodyHeightMin  = -10f;
-    public float bodyHeightMax  = 10f;
+    public float bodyHeightMin = -10f;
+    public float bodyHeightMax = 10f;
     public float bodyHeightSpeed = 12f;
-    public float rotationSpeed  = 5f;
-    public float stepCooldown    = 0.3f;
-    public float stepSpeed       = 20f;
-    public float stepHeight      = 2f;
+    public float rotationSpeed = 5f;
+    public float stepCooldown = 0.3f;
+    public float stepSpeed = 20f;
+    public float stepHeight = 2f;
     public LayerMask attachableLayers;
 
     [Header("Raycasting")]
-    public int   rayCount      = 100;
-    public int   kneeRayCount  = 40;
-    public float sightDistance  = 15f;
-    public float kneeRayScale   = 0.6f;
+    public int rayCount = 72;  // Reduced from 100
+    public int kneeRayCount = 24;  // Reduced from 40
+    public float sightDistance = 15f;
+    public float kneeRayScale = 0.6f;
+
+    [Header("Raycasting Performance")]
+    [Tooltip("How often to perform full raycasts (in frames). 1 = every frame, 3 = every 3rd frame")]
+    public int raycastFrameSkip = 2;
+    [Tooltip("Use simpler single raycast instead of RaycastAll")]
+    public bool useSimpleRaycasts = true;
+    [Tooltip("Maximum attachment points to store per side")]
+    public int maxPointsPerSide = 50;
 
     [Header("Web Physics")]
-    public float spiderWeightMult = 1.0f; // Factor of spider's mass applied to web segments
-    public float webWeightScale => spiderWeightMult; // Deprecated shim
+    public float spiderWeightMult = 1.0f;
+    public float webWeightScale => spiderWeightMult;
 
     [Header("Debug")]
     public bool showDebug = true;
 
     [Header("Digging")]
     public bool isDigging = false;
-    public float digSpeed = 8f;
-    private SpiderLegIK[] diggingLegs;
-    private float digCycle = 0f;
 
     // ── Runtime state ──────────────────────────────────────────
     private float targetBodyHeight = 0f;
     [HideInInspector] public Vector2 inputDirection;
     private Vector2 smoothedInput;
     private Vector2 currentSurfaceNormal = Vector2.up;
-    private float groundFactor = 1.0f; // 1.0 on solid ground, 0.0 on webs
+    private float groundFactor = 1.0f;
 
-    private List<AttachmentPoint> leftPoints  = new();
-    private List<AttachmentPoint> rightPoints = new();
+    private List<AttachmentPoint> leftPoints = new(64);
+    private List<AttachmentPoint> rightPoints = new(64);
     private Vector2[] restingFootOffsets;
     private int nextLegIndex;
     private int lastSteppedIndex = -1;
 
-    // Zero-allocation buffers for physics queries
-    private RaycastHit2D[] hitBuffer = new RaycastHit2D[100];
-    private Collider2D[] overlapBuffer = new Collider2D[2000]; // Can comfortably handle large webs
+    // Zero-allocation buffers for physics queries - REDUCED sizes
+    private RaycastHit2D[] hitBuffer = new RaycastHit2D[16];  // Reduced from 100
+    private Collider2D[] overlapBuffer = new Collider2D[100]; // Reduced from 2000
 
-    // Cached head transform — all orientation/position goes through this
+    // Frame skip counter
+    private int raycastFrameCounter = 0;
+
+    // Cached layer
+    private int webLayer;
+
+    // Cached head transform
     private Transform headT;
     private SpiderWebShooter shooter;
     private SpiderLegIK manipulatorLeg;
@@ -87,18 +98,17 @@ public class SpiderControllerIK : MonoBehaviour
     void Start()
     {
         shooter = GetComponent<SpiderWebShooter>();
+        webLayer = LayerMask.NameToLayer("Web");
+
         if (isAI)
         {
-            // 1. Auto-discover Legs
             if (legs == null || legs.Length == 0)
                 legs = GetComponentsInChildren<SpiderLegIK>();
 
-            // 2. Auto-discover Head/Body
             if (headRb == null) headRb = GetComponent<Rigidbody2D>();
             if (headRb == null) headRb = GetComponentInChildren<Rigidbody2D>();
         }
 
-        // Basic initialization required for both Player and AI
         headT = headRb != null ? headRb.transform : transform;
 
         if (headRb != null)
@@ -118,14 +128,12 @@ public class SpiderControllerIK : MonoBehaviour
                 string name = leg.gameObject.name.ToUpper();
                 bool isRight = name.Contains("LEG R") || name.Contains("LEG_R") || name.Contains("_R") || name.Contains("RIGHT");
                 leg.isPhysicallyRight = isRight;
-                // Knee direction usually mirrors physical side for spiders
-                leg.isLeftSide = isRight; 
+                leg.isLeftSide = isRight;
             }
         }
 
         PlantAllFeet();
         CaptureRestingPose();
-        InitializeDigging();
 
         foreach (var leg in legs)
             leg.Solve();
@@ -155,12 +163,11 @@ public class SpiderControllerIK : MonoBehaviour
             if (hit.collider != null)
             {
                 leg.currentFootPos = hit.point;
-                leg.targetFootPos  = hit.point;
-                leg.plantedNormal  = hit.normal;
+                leg.targetFootPos = hit.point;
+                leg.plantedNormal = hit.normal;
                 leg.isPlanted = true;
 
-                // Store initial points so AI can wander
-                GlobalAttachmentManager.StoreAttachmentPoint(hit.point, hit.normal, hit.collider.gameObject.layer == LayerMask.NameToLayer("Web") ? hit.collider.transform : null);
+                GlobalAttachmentManager.StoreAttachmentPoint(hit.point, hit.normal, hit.collider.gameObject.layer == webLayer ? hit.collider.transform : null);
             }
         }
     }
@@ -168,7 +175,16 @@ public class SpiderControllerIK : MonoBehaviour
     void Update()
     {
         ReadInput();
-        PerformRaycasts();
+
+        // Frame-skip raycasts for performance
+        raycastFrameCounter++;
+        bool shouldRaycast = (raycastFrameCounter >= raycastFrameSkip) || (inputDirection.sqrMagnitude > 0.1f);
+
+        if (shouldRaycast)
+        {
+            raycastFrameCounter = 0;
+            PerformRaycasts();
+        }
 
         if (inputDirection.sqrMagnitude > 0.01f)
             smoothedInput = Vector2.MoveTowards(smoothedInput, inputDirection, Time.deltaTime * 5f);
@@ -177,12 +193,12 @@ public class SpiderControllerIK : MonoBehaviour
 
         foreach (var leg in legs)
             if (leg.isPlanted) leg.plantedTimer += Time.deltaTime;
-        
+
         if (isDigging) HandleDigging();
         ProcessGait();
         HandleWebManipulation();
 
-        // --- Web Sensing (Player Only) ---
+        // Web Sensing (Player Only)
         if (!isAI)
         {
             foreach (var leg in legs)
@@ -195,17 +211,16 @@ public class SpiderControllerIK : MonoBehaviour
             }
         }
 
-        // Reactive Mid-Step Adjustment: Update legs currently in flight
+        // Reactive Mid-Step Adjustment
         foreach (var leg in legs)
         {
-            if (leg.isStepping && leg.stepProgress < 0.6f) // Lock in target for the final 40% of the step
+            if (leg.isStepping && leg.stepProgress < 0.6f)
             {
                 AttachmentPoint best = GetBestPoint(leg);
                 if (best.isValid)
                 {
-                    // Only update if the new target is significantly different or better for the new direction
                     float dist = Vector2.Distance(leg.targetFootPos, best.point);
-                    if (dist > minStride * 0.5f) 
+                    if (dist > minStride * 0.5f)
                         leg.UpdateStepTarget(best.point, best.normal, best.collider);
                 }
             }
@@ -229,7 +244,6 @@ public class SpiderControllerIK : MonoBehaviour
 
     void ReadInput()
     {
-        // 1. Hardware Polling (Only for non-AI)
         if (!isAI)
         {
             float rawH = Input.GetAxis("Horizontal");
@@ -245,24 +259,21 @@ public class SpiderControllerIK : MonoBehaviour
             if (Input.GetKey(KeyCode.E) || Input.GetKey(KeyCode.LeftShift)) heightInput += 1f;
             if (Input.GetKey(KeyCode.Q) || Input.GetKey(KeyCode.LeftControl)) heightInput -= 1f;
             if (Input.GetKeyDown(KeyCode.R)) isDigging = !isDigging;
-            
+
             targetBodyHeight += heightInput * bodyHeightSpeed * Time.deltaTime;
         }
 
-        // 2. Automated & Stick-Based dodging
         if (smoothedInput.sqrMagnitude > 0.1f)
         {
-            // Use the average surface normal for orientation-agnostic dodging
             float dodgeBias = Vector2.Dot(smoothedInput, currentSurfaceNormal);
-            
-            // Auto Reach: If moving into empty space, hunker
+
             int pointsAhead = 0;
-            foreach (var ap in leftPoints) 
+            foreach (var ap in leftPoints)
                 if (Vector2.Dot(ap.point - (Vector2)headT.position, smoothedInput.normalized) > 0.5f) pointsAhead++;
-            foreach (var ap in rightPoints) 
+            foreach (var ap in rightPoints)
                 if (Vector2.Dot(ap.point - (Vector2)headT.position, smoothedInput.normalized) > 0.5f) pointsAhead++;
 
-            if (pointsAhead < 2 && groundFactor < 0.1f) 
+            if (pointsAhead < 2 && groundFactor < 0.1f)
                 targetBodyHeight = Mathf.Lerp(targetBodyHeight, bodyHeightMin, Time.deltaTime * 3f);
             else
                 targetBodyHeight = Mathf.MoveTowards(targetBodyHeight, defaultBodyHeight + dodgeBias * 3f, Time.deltaTime * 3f);
@@ -272,17 +283,16 @@ public class SpiderControllerIK : MonoBehaviour
             targetBodyHeight = Mathf.MoveTowards(targetBodyHeight, defaultBodyHeight, Time.deltaTime * 2f);
         }
 
-        // Clamp height: Prevent negative height if on solid ground
         float clampMin = groundFactor > 0.1f ? 0.2f : bodyHeightMin;
-        
-        if (isDigging) targetBodyHeight = bodyHeightMin; // Hunker down when digging
+
+        if (isDigging) targetBodyHeight = bodyHeightMin;
 
         targetBodyHeight = Mathf.Clamp(targetBodyHeight, clampMin, bodyHeightMax);
         bodyHeight = Mathf.MoveTowards(bodyHeight, targetBodyHeight, bodyHeightSpeed * Time.deltaTime);
     }
 
     // ───────────────────────────────────────────────────────────
-    //  Raycasting
+    //  Raycasting - OPTIMIZED
     // ───────────────────────────────────────────────────────────
 
     void PerformRaycasts()
@@ -292,30 +302,64 @@ public class SpiderControllerIK : MonoBehaviour
 
         Vector2 origin = headRb != null ? headRb.position : (Vector2)headT.position;
 
-        int webLayer = LayerMask.NameToLayer("Web");
         float step = 360f / rayCount;
-        for (int i = 0; i < rayCount; i++)
-        {
-            float rad = i * step * Mathf.Deg2Rad;
-            Vector2 dir = new Vector2(Mathf.Cos(rad), Mathf.Sin(rad));
 
-            // Use RaycastAll so we can "See through" multiple strands of web
-            int hitCount = Physics2D.RaycastNonAlloc(origin, dir, hitBuffer, sightDistance, attachableLayers);
-            
-            // RAYCASTALL IS NOT ORDERED: We must sort by distance to handle obstructions correctly
-            if (hitCount > 0)
+        if (useSimpleRaycasts)
+        {
+            // SIMPLE MODE: Single raycast per direction (much faster)
+            for (int i = 0; i < rayCount; i++)
             {
-                // Manual insertion sort for zero allocations (hitCount is typically small)
-                for (int n = 1; n < hitCount; n++)
+                float rad = i * step * Mathf.Deg2Rad;
+                Vector2 dir = new Vector2(Mathf.Cos(rad), Mathf.Sin(rad));
+
+                RaycastHit2D hit = Physics2D.Raycast(origin, dir, sightDistance, attachableLayers);
+
+                if (hit.collider != null)
                 {
-                    var key = hitBuffer[n];
-                    int m = n - 1;
-                    while (m >= 0 && hitBuffer[m].distance > key.distance)
+                    float dist = Vector2.Distance(hit.point, origin);
+                    if (hit.collider.gameObject.layer == webLayer && dist < 1.0f)
+                        continue;
+
+                    float localX = headT.InverseTransformPoint(hit.point).x;
+                    var ap = new AttachmentPoint(hit.point, hit.normal, hit.collider);
+
+                    if (localX < 0)
                     {
-                        hitBuffer[m + 1] = hitBuffer[m];
-                        m = m - 1;
+                        if (leftPoints.Count < maxPointsPerSide)
+                            leftPoints.Add(ap);
                     }
-                    hitBuffer[m + 1] = key;
+                    else
+                    {
+                        if (rightPoints.Count < maxPointsPerSide)
+                            rightPoints.Add(ap);
+                    }
+                }
+            }
+        }
+        else
+        {
+            // COMPLEX MODE: RaycastNonAlloc for seeing through webs
+            for (int i = 0; i < rayCount; i++)
+            {
+                float rad = i * step * Mathf.Deg2Rad;
+                Vector2 dir = new Vector2(Mathf.Cos(rad), Mathf.Sin(rad));
+
+                int hitCount = Physics2D.RaycastNonAlloc(origin, dir, hitBuffer, sightDistance, attachableLayers);
+
+                if (hitCount > 1)
+                {
+                    // Sort only if multiple hits
+                    for (int n = 1; n < hitCount; n++)
+                    {
+                        var key = hitBuffer[n];
+                        int m = n - 1;
+                        while (m >= 0 && hitBuffer[m].distance > key.distance)
+                        {
+                            hitBuffer[m + 1] = hitBuffer[m];
+                            m--;
+                        }
+                        hitBuffer[m + 1] = key;
+                    }
                 }
 
                 for (int j = 0; j < hitCount; j++)
@@ -330,78 +374,86 @@ public class SpiderControllerIK : MonoBehaviour
                     float localX = headT.InverseTransformPoint(hit.point).x;
                     var ap = new AttachmentPoint(hit.point, hit.normal, hit.collider);
 
-                    if (localX < 0) leftPoints.Add(ap);
-                    else            rightPoints.Add(ap);
-                    
-                    // Stop evaluating this ray ONLY if we hit a solid surface.
-                    // If it's a web, keep looking for more web or ground behind it.
+                    if (localX < 0)
+                    {
+                        if (leftPoints.Count < maxPointsPerSide)
+                            leftPoints.Add(ap);
+                    }
+                    else
+                    {
+                        if (rightPoints.Count < maxPointsPerSide)
+                            rightPoints.Add(ap);
+                    }
+
                     if (hit.collider.gameObject.layer != webLayer)
                         break;
                 }
             }
         }
 
-        // --- Knee-based Raycasting for local obstacle/cliff detection ---
-        foreach (var leg in legs)
+        // Knee-based raycasting - ONLY when moving
+        if (inputDirection.sqrMagnitude > 0.05f)
         {
-            Vector2 kneeOrigin = leg.GetKneePosition();
-            float kneeStep = 360f / kneeRayCount;
-            for (int i = 0; i < kneeRayCount; i++)
+            foreach (var leg in legs)
             {
-                float rad = i * kneeStep * Mathf.Deg2Rad;
-                Vector2 dir = new Vector2(Mathf.Cos(rad), Mathf.Sin(rad));
-                int hitCount = Physics2D.RaycastNonAlloc(kneeOrigin, dir, hitBuffer, sightDistance * kneeRayScale, attachableLayers);
-                
-                if (hitCount > 0)
-                {
-                    // Manual insertion sort for zero allocations
-                    for (int n = 1; n < hitCount; n++)
-                    {
-                        var key = hitBuffer[n];
-                        int m = n - 1;
-                        while (m >= 0 && hitBuffer[m].distance > key.distance)
-                        {
-                            hitBuffer[m + 1] = hitBuffer[m];
-                            m = m - 1;
-                        }
-                        hitBuffer[m + 1] = key;
-                    }
+                Vector2 kneeOrigin = leg.GetKneePosition();
+                float kneeStep = 360f / kneeRayCount;
 
-                    for (int j = 0; j < hitCount; j++)
+                for (int i = 0; i < kneeRayCount; i++)
+                {
+                    float rad = i * kneeStep * Mathf.Deg2Rad;
+                    Vector2 dir = new Vector2(Mathf.Cos(rad), Mathf.Sin(rad));
+
+                    RaycastHit2D hit = Physics2D.Raycast(kneeOrigin, dir, sightDistance * kneeRayScale, attachableLayers);
+
+                    if (hit.collider != null)
                     {
-                        var hit = hitBuffer[j];
-                        if (hit.collider == null) continue;
                         float distFromHead = Vector2.Distance(hit.point, origin);
-                        
-                        // Allow webs even if they are very close to the head (overlap prevention)
                         bool isWeb = hit.collider.gameObject.layer == webLayer;
                         if (!isWeb && distFromHead < 1.0f)
                             continue;
 
                         float localX = headT.InverseTransformPoint(hit.point).x;
                         var ap = new AttachmentPoint(hit.point, hit.normal, hit.collider);
-                        if (localX < 0) leftPoints.Add(ap);
-                        else            rightPoints.Add(ap);
+
+                        if (localX < 0)
+                        {
+                            if (leftPoints.Count < maxPointsPerSide)
+                                leftPoints.Add(ap);
+                        }
+                        else
+                        {
+                            if (rightPoints.Count < maxPointsPerSide)
+                                rightPoints.Add(ap);
+                        }
                     }
                 }
             }
         }
 
-        // --- Volume-based Web Detection (The "Safety Net") ---
-        // This finds webs that radial rays might miss because they are too thin or aligned with the ray
-        int overlapCount = Physics2D.OverlapCircleNonAlloc(origin, sightDistance, overlapBuffer, LayerMask.GetMask("Web"));
-        for (int i = 0; i < overlapCount; i++)
+        // Web overlap detection - REDUCED radius and count
+        int overlapCount = Physics2D.OverlapCircleNonAlloc(origin, sightDistance * 0.5f, overlapBuffer, LayerMask.GetMask("Web"));
+        int webPointsAdded = 0;
+        int maxWebPoints = 30;
+
+        for (int i = 0; i < overlapCount && webPointsAdded < maxWebPoints; i++)
         {
             Collider2D col = overlapBuffer[i];
-            
-            // To drastically improve performance, use the segment's closest point 
-            // instead of generating multiple virtual sample points along the array.
-            // With hundreds of segments, generating 8 virtual points per segment was causing O(n^2) frame drops.
             Vector2 pL = col.ClosestPoint(origin);
             float localX = headT.InverseTransformPoint(pL).x;
             var ap = new AttachmentPoint(pL, (origin - pL).normalized, col);
-            if (localX < 0) leftPoints.Add(ap);
-            else            rightPoints.Add(ap);
+
+            if (localX < 0)
+            {
+                if (leftPoints.Count < maxPointsPerSide)
+                    leftPoints.Add(ap);
+            }
+            else
+            {
+                if (rightPoints.Count < maxPointsPerSide)
+                    rightPoints.Add(ap);
+            }
+            webPointsAdded++;
         }
     }
 
@@ -419,10 +471,9 @@ public class SpiderControllerIK : MonoBehaviour
         {
             Vector2 local = headT.InverseTransformPoint(legs[i].currentFootPos);
             avgY += local.y;
-            restingFootOffsets[i] = new Vector2(local.x, 0); // Flatten Y to remove hardcoded height
+            restingFootOffsets[i] = new Vector2(local.x, 0);
         }
-        
-        // Move the design height from offsets into the dynamic bodyHeight variable
+
         if (legs.Length > 0)
         {
             avgY /= legs.Length;
@@ -438,25 +489,23 @@ public class SpiderControllerIK : MonoBehaviour
 
     void ProcessGait()
     {
-        if (activeGait == GaitType.Urgency)  UrgencyGait();
-        else                                  AlternateGait();
+        if (activeGait == GaitType.Urgency) UrgencyGait();
+        else AlternateGait();
     }
 
     void UrgencyGait()
     {
-        // 1. Emergency Check: Over-extended legs MUST step regardless of gait constraints
         foreach (var leg in legs)
         {
             if (!leg.isPlanted || leg.isStepping) continue;
-            if (isDigging && System.Array.IndexOf(diggingLegs, leg) != -1) continue;
-            
-            if (leg.GetExtension() > legExtensionMax * 1.05f) // Small buffer
+
+            if (leg.GetExtension() > legExtensionMax * 1.05f)
             {
                 if (HasValidTarget(leg))
                 {
                     StepLeg(leg);
                     lastSteppedIndex = System.Array.IndexOf(legs, leg);
-                    return; // Handle one emergency per frame to maintain some order
+                    return;
                 }
             }
         }
@@ -479,24 +528,22 @@ public class SpiderControllerIK : MonoBehaviour
         foreach (var leg in legs)
         {
             if (!leg.isPlanted || leg.isStepping) continue;
-            if (isDigging && System.Array.IndexOf(diggingLegs, leg) != -1) continue;
 
             if (leg.isPhysicallyRight && detachedR >= Mathf.CeilToInt(maxDetached / 2f)) continue;
             if (!leg.isPhysicallyRight && detachedL >= Mathf.CeilToInt(maxDetached / 2f)) continue;
 
             float u = Urgency(leg);
-            if (u > maxUrg) 
-            { 
-                // ONLY consider a leg for stepping if it actually has somewhere better to go
+            if (u > maxUrg)
+            {
                 if (HasValidTarget(leg))
                 {
-                    maxUrg = u; 
-                    best = leg; 
+                    maxUrg = u;
+                    best = leg;
                 }
             }
         }
 
-        if (best != null) 
+        if (best != null)
         {
             lastSteppedIndex = System.Array.IndexOf(legs, best);
             StepLeg(best);
@@ -508,13 +555,6 @@ public class SpiderControllerIK : MonoBehaviour
         if (DetachedCount() >= maxDetached) return;
 
         var leg = legs[nextLegIndex];
-        
-        // Skip digging legs
-        if (isDigging && System.Array.IndexOf(diggingLegs, leg) != -1)
-        {
-            nextLegIndex = (nextLegIndex + 1) % legs.Length;
-            return;
-        }
 
         if (leg.isPlanted && !leg.isStepping && Urgency(leg) > 1f)
         {
@@ -528,15 +568,12 @@ public class SpiderControllerIK : MonoBehaviour
         int idx = System.Array.IndexOf(legs, leg);
         if (idx < 0 || restingFootOffsets == null) return 0f;
 
-        // Calculate the "Stable Base" (average of all planted feet)
-        // We use this for IdealPos to decouple gait from head bobbing/dodging.
         Vector2 avgPlantedCenter = Vector2.zero;
         int plantedCount = 0;
         foreach (var l in legs) { if (l.isPlanted) { avgPlantedCenter += l.currentFootPos; plantedCount++; } }
         if (plantedCount > 0) avgPlantedCenter /= plantedCount;
         else avgPlantedCenter = (Vector2)headT.position;
 
-        // Ideal position is relative to the center of the feet, not the current shifting head
         float maxReach = leg.thighLength + leg.shinLength;
         Vector2 idealPos = avgPlantedCenter + (Vector2)(headT.rotation * restingFootOffsets[idx])
                          + smoothedInput * maxReach * 0.4f;
@@ -549,19 +586,15 @@ public class SpiderControllerIK : MonoBehaviour
         float extensionUrgency = (ext > 0.9f) ? (ext - 0.9f) * 10f : 0f;
         if (minExt < 1.1f) extensionUrgency += (1.1f - minExt) * 2f;
 
-        // 4. Rhythm/Alternating Bias
         float rhythmUrgency = 0f;
         if (lastSteppedIndex != -1)
         {
-            // Prefer legs on the opposite side
             bool sameSide = legs[lastSteppedIndex].isPhysicallyRight == leg.isPhysicallyRight;
             rhythmUrgency = sameSide ? 0f : 0.4f;
         }
 
-        // Only have high positional urgency if we can actually take a significant stride
         float positionalUrgency = (distFromIdeal < minStride || smoothedInput.sqrMagnitude < 0.01f) ? 0f : idealUrgency;
 
-        // 6. Proximity Urgency (Avoid legs bunching up)
         float proximityUrgency = 0f;
         foreach (var other in legs)
         {
@@ -596,12 +629,10 @@ public class SpiderControllerIK : MonoBehaviour
 
     AttachmentPoint GetBestPoint(SpiderLegIK leg)
     {
-        int webLayer = LayerMask.NameToLayer("Web");
         int idx = System.Array.IndexOf(legs, leg);
         List<AttachmentPoint> pool = leg.isPhysicallyRight ? rightPoints : leftPoints;
         if (pool.Count == 0) return new AttachmentPoint { isValid = false };
 
-        // Stable Base for Ideal Pos
         Vector2 avgPlantedCenter = Vector2.zero;
         int plantedCount = 0;
         foreach (var l in legs) { if (l.isPlanted) { avgPlantedCenter += l.currentFootPos; plantedCount++; } }
@@ -623,14 +654,12 @@ public class SpiderControllerIK : MonoBehaviour
             bool isWeb = ap.collider.gameObject.layer == webLayer;
 
             if (distFromHead > legExtensionMax || distFromHead < legExtensionMin) continue;
-            
-            // On webs, allow stepping much closer to the head to ensure we don't "miss" the strand segment under us
+
             float effectSafeArea = isWeb ? headSafeArea * 0.5f : headSafeArea;
-            if (distFromHead < effectSafeArea) continue; 
-            
+            if (distFromHead < effectSafeArea) continue;
+
             if (IsPointTooCloseToOtherFeet(ap.point, leg)) continue;
 
-            // Significant stride check ONLY for the start of a step
             if (!leg.isStepping && inputDirection.sqrMagnitude > 0.01f)
             {
                 if (Vector2.Distance(leg.currentFootPos, ap.point) < minStride * (isWeb ? 0.5f : 1.0f))
@@ -640,46 +669,37 @@ public class SpiderControllerIK : MonoBehaviour
             float localX = headT.InverseTransformPoint(ap.point).x;
             float score = 0f;
 
-            // 1. Distance to predictive goal
             score -= Vector2.Distance(idealPos, ap.point) * 2.0f;
-            
-            // 2. Center-line avoidance (RELAXED ON WEBS)
-            float sideBias = leg.isPhysicallyRight ? 1f : -1f;
-            float sideMargin = isWeb ? -0.5f : 0.1f; // Allow reaching across the center-line on webs
-            if (localX * sideBias < sideMargin) continue; 
 
-            // 4. Directional Progressive Check (HARD FILTER)
+            float sideBias = leg.isPhysicallyRight ? 1f : -1f;
+            float sideMargin = isWeb ? -0.5f : 0.1f;
+            if (localX * sideBias < sideMargin) continue;
+
             if (smoothedInput.sqrMagnitude > 0.05f)
             {
                 Vector2 stepVec = (ap.point - leg.currentFootPos);
                 float progress = Vector2.Dot(stepVec, smoothedInput.normalized);
-                if (progress < -minStride * 0.1f) continue; 
+                if (progress < -minStride * 0.1f) continue;
             }
 
-            // 3. Extension preference
             float extDiff = Mathf.Abs(distFromHead - comfortZone);
             score -= extDiff * 1.5f;
 
-            // 5. Huge Step Penalty
             float moveDist = Vector2.Distance(leg.currentFootPos, ap.point);
             if (moveDist > maxReach * 1.2f) score -= 10f;
 
-            // 4. Directional consistency
             if (smoothedInput.sqrMagnitude > 0.05f)
             {
                 Vector2 shoulderPos = (Vector2)headT.TransformPoint(restingFootOffsets[idx]);
                 Vector2 toPointRel = ap.point - shoulderPos;
                 Vector2 inputNorm = smoothedInput.normalized;
-                
+
                 float projection = Vector2.Dot(toPointRel, inputNorm);
-                score += projection * 5f; 
+                score += projection * 5f;
                 score += Vector2.Dot(toPointRel.normalized, inputNorm) * 8f;
             }
 
-            // 5. Directional/Orientation Scores
-            // Removed localY penalty and normal-up bias to avoid 'upward distinction'
             score += Mathf.Abs(localX) * 2f;
-            // score += Vector2.Dot(ap.normal, headT.up) * 3f; 
 
             if (score > bestScore) { bestScore = score; best = ap; }
         }
@@ -692,18 +712,16 @@ public class SpiderControllerIK : MonoBehaviour
         Vector2 inputNorm = smoothedInput.normalized;
         bool hasInput = smoothedInput.sqrMagnitude > 0.05f;
 
-        int webLayer = LayerMask.NameToLayer("Web");
         foreach (var ap in pool)
         {
             float distFromHead = Vector2.Distance(headRb.position, ap.point);
             bool isWeb = ap.collider.gameObject.layer == webLayer;
 
             if (distFromHead > legExtensionMax || distFromHead < legExtensionMin) continue;
-            
-            float effectSafeArea = isWeb ? headSafeArea * 0.5f : headSafeArea;
-            if (distFromHead < effectSafeArea) continue; 
 
-            // Longitudinal check (side detection)
+            float effectSafeArea = isWeb ? headSafeArea * 0.5f : headSafeArea;
+            if (distFromHead < effectSafeArea) continue;
+
             float localX = headT.InverseTransformPoint(ap.point).x;
             float sideBias = leg.isPhysicallyRight ? 1f : -1f;
             float sideMargin = isWeb ? -0.5f : 0.1f;
@@ -711,15 +729,13 @@ public class SpiderControllerIK : MonoBehaviour
 
             if (IsPointTooCloseToOtherFeet(ap.point, leg)) continue;
 
-            // Must be a significant step
             float stepDist = Vector2.Distance(leg.currentFootPos, ap.point);
             if (stepDist < minStride * (isWeb ? 0.5f : 1.0f)) continue;
 
-            // If moving, must provide forward progress relative to SMOOTHED input
             if (hasInput)
             {
                 float progress = Vector2.Dot(ap.point - leg.currentFootPos, inputNorm);
-                if (progress < 0.05f) continue; 
+                if (progress < 0.05f) continue;
             }
 
             return true;
@@ -741,69 +757,64 @@ public class SpiderControllerIK : MonoBehaviour
     // ───────────────────────────────────────────────────────────
     //  Digging Routine
     // ───────────────────────────────────────────────────────────
-    
-    void InitializeDigging()
-    {
-        if (legs != null && legs.Length >= 2)
-        {
-            // Find the two frontmost legs (highest local Y)
-            var sortedLegs = new List<SpiderLegIK>(legs);
-            sortedLegs.Sort((a, b) => {
-                Vector2 anchorA = a.bodyTransform != null ? (Vector2)a.bodyTransform.TransformPoint(a.bodyAnchor) : (Vector2)a.transform.position;
-                Vector2 anchorB = b.bodyTransform != null ? (Vector2)b.bodyTransform.TransformPoint(b.bodyAnchor) : (Vector2)b.transform.position;
-                float yA = headT.InverseTransformPoint(anchorA).y;
-                float yB = headT.InverseTransformPoint(anchorB).y;
-                return yB.CompareTo(yA);
-            });
-            diggingLegs = new SpiderLegIK[] { sortedLegs[0], sortedLegs[1] };
-        }
-    }
 
     void HandleDigging()
     {
-        if (diggingLegs == null || diggingLegs.Length == 0) return;
+        Vector2 mousePos = Camera.main.ScreenToWorldPoint(Input.mousePosition);
 
-        digCycle += Time.deltaTime * digSpeed;
-        Vector2 digDir = smoothedInput.sqrMagnitude > 0.1f ? smoothedInput.normalized : (Vector2)headT.up;
+        AttachmentPoint bestPoint = new AttachmentPoint { isValid = false };
+        float closestDist = 2.0f;
 
-        for (int i = 0; i < diggingLegs.Length; i++)
+        var pool = new List<AttachmentPoint>(leftPoints);
+        pool.AddRange(rightPoints);
+
+        foreach (var ap in pool)
         {
-            var leg = diggingLegs[i];
-            
-            // Cancel stepper if they are stepping when dig triggers
-            if (leg.isStepping)
+            float d = Vector2.Distance(ap.point, mousePos);
+            if (d < closestDist)
             {
-                leg.isStepping = false;
-                leg.stepProgress = 0f;
+                closestDist = d;
+                bestPoint = ap;
+            }
+        }
+
+        if (bestPoint.isValid)
+        {
+            SpiderLegIK bestLeg = null;
+            float legDist = float.MaxValue;
+
+            foreach (var leg in legs)
+            {
+                if (leg.isStepping) continue;
+
+                int idx = System.Array.IndexOf(legs, leg);
+                Vector2 shoulderPos = (Vector2)headT.TransformPoint(restingFootOffsets[idx]);
+                float reach = leg.thighLength + leg.shinLength;
+
+                if (Vector2.Distance(bestPoint.point, shoulderPos) < reach * 0.95f)
+                {
+                    float d = Vector2.Distance(leg.currentFootPos, bestPoint.point);
+                    if (d < legDist) { legDist = d; bestLeg = leg; }
+                }
             }
 
-            // Offset cycles so legs alternate scraping
-            float localCycle = (digCycle + (i * Mathf.PI)) % (Mathf.PI * 2);
-            
-            int idx = System.Array.IndexOf(legs, leg);
-            float maxReach = leg.thighLength + leg.shinLength;
-            
-            // Anchor scraping loop slightly ahead of the shoulder
-            Vector2 shoulderPos = (Vector2)headT.TransformPoint(restingFootOffsets[idx]);
-            Vector2 basePoint = shoulderPos + digDir * (maxReach * 0.6f);
-
-            // Phase values 
-            float forwardExt = Mathf.Cos(localCycle); // 1 to -1 
-            float verticalExt = Mathf.Sin(localCycle); 
-
-            // Create an oval shaped animation (reach forward in air, pull backward against ground)
-            Vector2 pullOffset = digDir * (forwardExt * maxReach * 0.4f);
-            Vector2 liftOffset = (verticalExt > 0) ? (Vector2)headT.up * verticalExt * stepHeight : Vector2.zero; // Up relative to spider
-
-            leg.currentFootPos = basePoint + pullOffset + liftOffset;
-            leg.targetFootPos = leg.currentFootPos;
-            leg.isPlanted = verticalExt <= 0; // Considered planted when scraping
-
-            // Hook for Terrain Destruction / SFX
-            if (verticalExt <= 0 && verticalExt > -0.2f * digSpeed * Time.deltaTime)
+            if (bestLeg != null)
             {
-                // This triggers at the start of the "scrape" backward
-                // TODO: Instantiate physical dirt chunk, emit particle, or call Terrain.Mine(leg.currentFootPos) here.
+                if (bestLeg.isPlanted && legDist < 0.5f)
+                {
+                    var terrain = bestPoint.collider.GetComponent<DestructibleTerrain>();
+                    if (terrain != null)
+                    {
+                        terrain.MineHole(bestPoint.point, 1.2f);
+
+                        bestLeg.isPlanted = false;
+                        bestLeg.currentFootPos += (Vector2)bestPoint.normal * 1.5f;
+                    }
+                }
+                else
+                {
+                    bestLeg.StepTo(bestPoint.point, bestPoint.normal, bestPoint.collider);
+                }
             }
         }
     }
@@ -816,45 +827,38 @@ public class SpiderControllerIK : MonoBehaviour
     {
         if (restingFootOffsets == null || legs == null) return;
 
-        // 0. Synchronize all legs to their moving surfaces (webs) 
         foreach (var leg in legs) leg.SyncToSurface();
 
         int planted = 0;
         Vector2 avgFootPos = Vector2.zero;
-        Vector2 normalSum  = Vector2.zero;
+        Vector2 normalSum = Vector2.zero;
 
-        // 1. Gather status from planted legs
         foreach (var leg in legs)
         {
             if (!leg.isPlanted) continue;
-            
-            avgFootPos   += leg.currentFootPos;
-            normalSum    += leg.plantedNormal;
-            
+
+            avgFootPos += leg.currentFootPos;
+            normalSum += leg.plantedNormal;
+
             planted++;
         }
 
         if (planted == 0)
         {
-            headRb.freezeRotation = false; // Fall naturally
+            headRb.freezeRotation = false;
             return;
         }
 
-        // Calculate Groundedness (How many legs are on solid surfaces vs webs)
-        int webLayer = LayerMask.NameToLayer("Web");
         int groundPlanted = 0;
         foreach (var leg in legs)
         {
             if (leg.isPlanted && leg.plantedTransform != null && leg.plantedTransform.gameObject.layer != webLayer)
                 groundPlanted++;
         }
-        // groundFactor is 1.0 on solid floor, ~0.0 on webs.
         groundFactor = (float)groundPlanted / Mathf.Max(1, planted);
 
-        // Multi-leg stability on strands: 
-        // If we have many legs on the SAME strand, we can move more confidently.
         int maxOnSameStrand = 0;
-        var counts = new System.Collections.Generic.Dictionary<Collider2D, int>();
+        var counts = new Dictionary<Collider2D, int>();
         foreach (var leg in legs)
         {
             if (leg.isPlanted && leg.plantedTransform != null)
@@ -875,8 +879,6 @@ public class SpiderControllerIK : MonoBehaviour
         else
             avgNormal = normalSum.normalized;
 
-        // 2. Determine "Stable Frame" (Shortest-path rotation for a vertically symmetrical spider)
-        // Derived from foot locations to ensure the body "squares up" to its sprawl.
         float num = 0, den = 0;
         Vector2 center = (avgFootPos / planted);
         for (int i = 0; i < legs.Length; i++)
@@ -896,12 +898,10 @@ public class SpiderControllerIK : MonoBehaviour
         else
         {
             targetAngle = Mathf.Atan2(num, den) * Mathf.Rad2Deg;
-            
-            // 180-degree symmetry management: pick shortest path 
-            // but bias towards surface normal if on solid ground.
+
             float altAngle = targetAngle + 180f;
             float currentAngle = headT.rotation.eulerAngles.z;
-            
+
             float diff1 = Mathf.Abs(Mathf.DeltaAngle(currentAngle, targetAngle));
             float diff2 = Mathf.Abs(Mathf.DeltaAngle(currentAngle, altAngle));
 
@@ -916,12 +916,10 @@ public class SpiderControllerIK : MonoBehaviour
                 targetAngle = altAngle;
             }
         }
-        
+
         currentSurfaceNormal = avgNormal;
         Quaternion stableRot = Quaternion.Euler(0, 0, targetAngle);
 
-        // 3. Calculate target position using the stable frame to transform offsets.
-        // This decouples the target calculation from the current head rotation, stopping wobbles.
         Vector2 posSum = Vector2.zero;
         for (int i = 0; i < legs.Length; i++)
         {
@@ -929,73 +927,55 @@ public class SpiderControllerIK : MonoBehaviour
             Vector2 worldOffset = stableRot * (Vector3)restingFootOffsets[i];
             posSum += (legs[i].currentFootPos - worldOffset);
         }
-        
+
         Vector2 targetPos = (posSum / planted);
 
-        // 3.5 Surface-Aware Height Adjustment: Prevent the body from 'clipping' into sharp crests.
-        // On sharp curves, the average foot position (posSum/planted) is often deep inside the collider.
-        // We do a belly-raycast to find the actual ground under our center and use that as the height base.
         float searchRadius = bodyHeight > 0 ? bodyHeight * 2.0f : 2.0f;
         RaycastHit2D centerHit = Physics2D.Raycast(targetPos + avgNormal * searchRadius, -avgNormal, searchRadius * 2.0f, attachableLayers);
         if (centerHit.collider != null)
         {
             float surfaceProg = Vector2.Dot(centerHit.point, avgNormal);
-            float targetProg  = Vector2.Dot(targetPos, avgNormal);
+            float targetProg = Vector2.Dot(targetPos, avgNormal);
             if (targetProg < surfaceProg)
             {
-                // Lift the target position to be exactly at the surface before adding effectHeight
                 targetPos += avgNormal * (surfaceProg - targetProg);
             }
         }
 
-        
-        // Scale body height and lead: 
-        // We always want SOME height and lead to facilitate gait, even on webs.
-        // If on ground OR a single continuous strand, we move more confidently (higher and faster)
         float confidence = Mathf.Max(groundFactor, strandFactor * 0.7f);
-        
+
         float effectHeight = bodyHeight * Mathf.Lerp(0.2f, 1.0f, confidence);
-        float effectLead   = bodyLead   * Mathf.Lerp(0.4f, 1.0f, confidence);
-        
+        float effectLead = bodyLead * Mathf.Lerp(0.4f, 1.0f, confidence);
+
         targetPos += avgNormal * effectHeight;
 
-        // 4. Input Lead: Have the head subtly lead the feet to drive the gait
         if (smoothedInput.sqrMagnitude > 0.01f)
         {
-            // Project the lead onto the surface plane for stability
             targetPos += (Vector2)smoothedInput * effectLead;
         }
 
-        // 5. Move the Body
         Vector2 toTarget = targetPos - headRb.position;
-        
-        // Stationary Stability & Surface-based damping
+
         float surfaceSmoothing = Mathf.Lerp(bodySmoothing * 0.7f, bodySmoothing, groundFactor);
         float currentSmoothing = (inputDirection.sqrMagnitude > 0.01f) ? surfaceSmoothing : surfaceSmoothing * 0.2f;
-        
+
         Vector2 gravityCancel = -Physics2D.gravity * headRb.gravityScale;
-        
-        // Smoothly reach the calculated target
+
         headRb.linearVelocity = Vector2.Lerp(headRb.linearVelocity, toTarget * currentSmoothing, Time.fixedDeltaTime * 10f);
         headRb.AddForce(gravityCancel * headRb.mass, ForceMode2D.Force);
 
-        // 5. Rotate the Body to match the surface
         headT.rotation = Quaternion.Slerp(headT.rotation, stableRot, Time.fixedDeltaTime * rotationSpeed);
         headRb.freezeRotation = true;
 
-        // 6. Apply Weight to Webs
-        // This transfers the spider's physical presence onto the strands so they sag and react.
         if (spiderWeightMult > 0.01f && planted > 0)
         {
-            // Boosted force to actually move the strands against damping
             float weightPerLeg = (headRb.mass * Mathf.Abs(Physics2D.gravity.y) * spiderWeightMult * 2.0f) / planted;
             Vector2 weightDir = Physics2D.gravity.normalized;
-            
+
             foreach (var leg in legs)
             {
                 if (leg.isPlanted && leg.plantedTransform != null)
                 {
-                    // Use the plantedRb cached in the leg if possible, or fetch it
                     Rigidbody2D targetRb = leg.plantedTransform.GetComponentInParent<Rigidbody2D>();
                     if (targetRb != null && targetRb != headRb)
                     {
@@ -1029,12 +1009,9 @@ public class SpiderControllerIK : MonoBehaviour
         Vector2 mousePos = Camera.main.ScreenToWorldPoint(Input.mousePosition);
         float distToHead = Vector2.Distance(mousePos, headT.position);
 
-        // Detect if cursor is in grab range (Now based on leg reach)
-        // CRITICAL: Only grab if the shooter is actually holding a live web
         if (!isManipulating && distToHead < legExtensionMax && shooter.IsHoldingWeb)
         {
-            // Pick the closest front leg to grab the thread
-            manipulatorLeg = legs[0]; 
+            manipulatorLeg = legs[0];
             isManipulating = true;
             manipulatorLeg.isPlanted = false;
 
@@ -1043,17 +1020,15 @@ public class SpiderControllerIK : MonoBehaviour
 
         if (isManipulating)
         {
-            // Override the leg to follow the cursor
             manipulatorLeg.currentFootPos = Vector2.Lerp(manipulatorLeg.currentFootPos, mousePos, Time.deltaTime * 20f);
             manipulatorLeg.isPlanted = false;
 
-            // Check if we are touching a surface or existing web to "Stick" the web
             Collider2D col = Physics2D.OverlapCircle(manipulatorLeg.currentFootPos, 0.5f, attachableLayers | LayerMask.GetMask("Web"));
-            
+
             bool shouldStick = false;
             if (col != null)
             {
-                if (col.gameObject.layer == LayerMask.NameToLayer("Web"))
+                if (col.gameObject.layer == webLayer)
                 {
                     WebSegment otherWs = col.GetComponent<WebSegment>();
                     if (otherWs != null && otherWs.stringId != shooter.stringId)
@@ -1061,26 +1036,23 @@ public class SpiderControllerIK : MonoBehaviour
                 }
                 else
                 {
-                    shouldStick = true; // Automatically stick to whatever non-web attachable surface we hit
+                    shouldStick = true;
                 }
-                
+
                 if (Input.GetMouseButtonDown(0))
                     shouldStick = true;
             }
 
             if (shouldStick)
             {
-                // Finalize the web at this location with explicit physical locking
                 shooter.FinalizeExtrusion(col, manipulatorLeg.currentFootPos);
-                shooter.SetTetherAnchor(null); 
+                shooter.SetTetherAnchor(null);
                 isManipulating = false;
 
-                // Lock the foot to the surface/web we just stuck to
                 manipulatorLeg.StepTo(manipulatorLeg.currentFootPos, currentSurfaceNormal, col);
                 manipulatorLeg = null;
             }
-            
-            // If cursor leaves too far, release (Now based on leg reach)
+
             if (distToHead > legExtensionMax * 1.5f)
             {
                 if (shooter != null) shooter.SetTetherAnchor(null);

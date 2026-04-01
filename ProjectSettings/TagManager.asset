@@ -24,7 +24,7 @@ TagManager:
   - Legs8
   - Legs9
   - Background
-  - 
+  - Dirt
   - 
   - 
   - 
@@ -44,6 +44,9 @@ TagManager:
     locked: 0
   - name: Surface
     uniqueID: 2564226439
+    locked: 0
+  - name: Actors
+    uniqueID: 4229751207
     locked: 0
   m_RenderingLayers:
   - Default

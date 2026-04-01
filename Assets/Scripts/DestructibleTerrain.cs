@@ -1,5 +1,7 @@
 using UnityEngine;
+using UnityEngine.Rendering.Universal;
 using Clipper2Lib;
+using System.Collections.Generic;
 
 [RequireComponent(typeof(PolygonCollider2D))]
 public class DestructibleTerrain : MonoBehaviour
@@ -12,19 +14,46 @@ public class DestructibleTerrain : MonoBehaviour
     public string sortingLayerName = "Default";
     public int sortingOrder = 0;
 
+    [Header("Shadow Caster (Surface Only)")]
+    [Tooltip("Creates a child shadow proxy that casts shadows from the terrain surface profile")]
+    public bool enableShadowCaster = true;
+    [Tooltip("Minimum seconds between shadow updates during mining")]
+    public float shadowUpdateCooldown = 0.5f;
+
     private PolygonCollider2D col;
     private MeshFilter meshFilter;
     private MeshRenderer meshRenderer;
-
-    // CRITICAL: Track the mesh to prevent memory leaks
     private Mesh cachedMesh;
+    private float lastShadowUpdateTime = -999f;
+
+    // Shadow proxy
+    private GameObject shadowProxy;
+    private PolygonCollider2D shadowCollider;
+    private ShadowCaster2D shadowCaster;
+
+    // Surface profile from ProceduralTerrainGenerator
+    private Vector2[] surfaceProfile;
+    private float terrainHeight;
 
     void Start()
     {
         col = GetComponent<PolygonCollider2D>();
         EnsureVisuals();
         UpdateMesh();
+        UpdateShadowCaster();
     }
+
+    /// <summary>
+    /// Called by ProceduralTerrainGenerator after generation.
+    /// Stores the smooth surface profile for shadow casting.
+    /// </summary>
+    public void SetSurfaceProfile(Vector2[] profile, float height)
+    {
+        surfaceProfile = profile;
+        terrainHeight = height;
+    }
+
+    #region Visual Mesh Setup
 
     public void EnsureVisuals()
     {
@@ -86,6 +115,10 @@ public class DestructibleTerrain : MonoBehaviour
         meshRenderer.SetPropertyBlock(block);
     }
 
+    #endregion
+
+    #region Terrain Modification
+
     public void MineHole(Vector2 worldPos, float radius, int circleSegments = 16)
     {
         EnsureVisuals();
@@ -126,7 +159,12 @@ public class DestructibleTerrain : MonoBehaviour
         }
 
         UpdateMesh();
-        UpdateShadowCaster();
+
+        if (enableShadowCaster && Time.time - lastShadowUpdateTime > shadowUpdateCooldown)
+        {
+            UpdateShadowCaster();
+            lastShadowUpdateTime = Time.time;
+        }
     }
 
     public void UpdateMesh()
@@ -134,7 +172,6 @@ public class DestructibleTerrain : MonoBehaviour
         EnsureVisuals();
         if (col == null || meshFilter == null) return;
 
-        // CRITICAL FIX: Destroy old mesh before creating a new one
         if (cachedMesh != null)
         {
             if (Application.isPlaying)
@@ -184,31 +221,119 @@ public class DestructibleTerrain : MonoBehaviour
         meshFilter.sharedMesh = mesh;
     }
 
+    #endregion
+
+    #region Shadow Proxy (Surface Only)
+
+    /// <summary>
+    /// Builds a shadow caster from the stored surface profile.
+    /// The polygon is: bottom-left → surface (left to right) → bottom-right.
+    /// This creates a solid shape where only the surface edge casts visible shadows,
+    /// blocking light from penetrating underground.
+    /// </summary>
     public void UpdateShadowCaster()
     {
-#if UNITY_2020_1_OR_NEWER
-        EnsureVisuals();
-        var shadowCaster = GetComponent<UnityEngine.Rendering.Universal.ShadowCaster2D>();
-        if (shadowCaster == null) return;
-
-        var shapeField = typeof(UnityEngine.Rendering.Universal.ShadowCaster2D).GetField("m_ShapePath", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-        var generateMethod = typeof(UnityEngine.Rendering.Universal.ShadowCaster2D).GetMethod("GenerateShadowMesh", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-        var meshField = typeof(UnityEngine.Rendering.Universal.ShadowCaster2D).GetField("m_Mesh", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-
-        if (shapeField != null && generateMethod != null && meshField != null && col.pathCount > 0)
+        if (!enableShadowCaster)
         {
-            Vector2[] path2D = col.GetPath(0);
-            Vector3[] path3D = new Vector3[path2D.Length];
-            for (int i = 0; i < path2D.Length; i++)
-                path3D[i] = new Vector3(path2D[i].x, path2D[i].y, 0);
-
-            shapeField.SetValue(shadowCaster, path3D);
-            generateMethod.Invoke(shadowCaster, new object[] { meshField.GetValue(shadowCaster), shapeField.GetValue(shadowCaster) });
+            DestroyShadowProxy();
+            return;
         }
-#endif
+
+        if (surfaceProfile == null || surfaceProfile.Length < 2) return;
+
+        EnsureShadowProxy();
+
+        Vector2[] shape = BuildSurfaceShadowShape();
+        if (shape == null || shape.Length < 3)
+        {
+            shadowCollider.pathCount = 0;
+            return;
+        }
+
+        shadowCollider.pathCount = 1;
+        shadowCollider.SetPath(0, shape);
     }
 
-    // CRITICAL: Clean up mesh when destroyed
+    /// <summary>
+    /// Builds a thin polygon strip along the surface profile.
+    /// The bottom sits just below the lowest surface point so the terrain mesh
+    /// hides the bottom/side edges. Only the surface edge casts visible shadows.
+    /// </summary>
+    private Vector2[] BuildSurfaceShadowShape()
+    {
+        float minX = surfaceProfile[0].x;
+        float maxX = surfaceProfile[surfaceProfile.Length - 1].x;
+
+        // Find the lowest surface point and extend just below it
+        float lowestY = surfaceProfile[0].y;
+        for (int i = 1; i < surfaceProfile.Length; i++)
+        {
+            if (surfaceProfile[i].y < lowestY)
+                lowestY = surfaceProfile[i].y;
+        }
+        float bottomY = lowestY - 1f; // Thin strip — hidden behind terrain mesh
+
+        // Shape: bottom-left, surface points (left to right), bottom-right
+        // Winding: up → right → down → left = counter-clockwise
+        Vector2[] shape = new Vector2[surfaceProfile.Length + 2];
+
+        shape[0] = new Vector2(minX, bottomY);                     // bottom-left
+
+        for (int i = 0; i < surfaceProfile.Length; i++)
+            shape[i + 1] = surfaceProfile[i];                     // surface, left to right
+
+        shape[surfaceProfile.Length + 1] = new Vector2(maxX, bottomY); // bottom-right
+
+        return shape;
+    }
+
+    private void EnsureShadowProxy()
+    {
+        if (shadowProxy != null && shadowCollider != null && shadowCaster != null) return;
+
+        Transform existing = transform.Find("ShadowProxy");
+        if (existing != null)
+        {
+            shadowProxy = existing.gameObject;
+        }
+        else
+        {
+            shadowProxy = new GameObject("ShadowProxy");
+            shadowProxy.transform.SetParent(transform, false);
+            shadowProxy.transform.localPosition = Vector3.zero;
+            shadowProxy.transform.localRotation = Quaternion.identity;
+            shadowProxy.transform.localScale = Vector3.one;
+            shadowProxy.layer = gameObject.layer;
+        }
+
+        shadowCollider = shadowProxy.GetComponent<PolygonCollider2D>();
+        if (shadowCollider == null)
+            shadowCollider = shadowProxy.AddComponent<PolygonCollider2D>();
+        shadowCollider.isTrigger = true;
+
+        shadowCaster = shadowProxy.GetComponent<ShadowCaster2D>();
+        if (shadowCaster == null)
+            shadowCaster = shadowProxy.AddComponent<ShadowCaster2D>();
+    }
+
+    private void DestroyShadowProxy()
+    {
+        if (shadowProxy == null) return;
+
+        if (Application.isPlaying)
+            Destroy(shadowProxy);
+        else
+            DestroyImmediate(shadowProxy);
+
+        shadowProxy = null;
+        shadowCollider = null;
+        shadowCaster = null;
+    }
+
+    #endregion
+
+    #region Cleanup
+
     void OnDestroy()
     {
         if (cachedMesh != null)
@@ -221,7 +346,6 @@ public class DestructibleTerrain : MonoBehaviour
         }
     }
 
-    // CRITICAL: Clean up mesh when disabled (in case of pooling)
     void OnDisable()
     {
         if (cachedMesh != null && Application.isPlaying)
@@ -230,4 +354,6 @@ public class DestructibleTerrain : MonoBehaviour
             cachedMesh = null;
         }
     }
+
+    #endregion
 }

@@ -53,6 +53,11 @@ public class SpiderLegIK : MonoBehaviour
     private SpiderControllerIK controller;
     private bool useLimbSolver;
 
+    // ── Dig-strike state ──────────────────────────────────────
+    [HideInInspector] public bool isDigStriking = false;
+    private Rigidbody2D footRb;
+    private Rigidbody2D shinRb;
+
     // ── Joint anchor data (read from HingeJoint2Ds at startup) ──
     // These are LOCAL-SPACE positions of the actual joints on each sprite.
     [Header("Debug: Anchor Data (auto-filled)")]
@@ -82,6 +87,10 @@ public class SpiderLegIK : MonoBehaviour
         DisablePhysics(thigh);
         DisablePhysics(shin);
         DisablePhysics(foot);
+
+        // Cache foot/shin rigidbodies for dig-strike
+        if (foot != null) footRb = foot.GetComponent<Rigidbody2D>();
+        if (shin != null) shinRb = shin.GetComponent<Rigidbody2D>();
 
         if (useLimbSolver && ikTarget != null)
             ikTarget.SetParent(null);
@@ -421,6 +430,166 @@ public class SpiderLegIK : MonoBehaviour
     {
         float u = 1f - t;
         return u * u * a + 2f * u * t * b + t * t * c;
+    }
+
+    // ───────────────────────────────────────────────────────────
+    //  Dig Strike
+    // ───────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Performs a reach → wind-up → punch → impact → recover dig animation.
+    /// Uses the surface normal to determine the wind-up (lift) and strike (slam) directions.
+    /// The surfaceCollider is the terrain collider already detected by the controller.
+    /// </summary>
+    public void DigStrike(Vector2 surfacePoint, Vector2 surfaceNormal, Collider2D surfaceCollider, float windUpDist, float strikeSpeed, float digRadius, float windUpTime, float recoveryTime)
+    {
+        if (isDigStriking || isStepping) return;
+        StartCoroutine(DigStrikeCoroutine(surfacePoint, surfaceNormal, surfaceCollider, windUpDist, strikeSpeed, digRadius, windUpTime, recoveryTime));
+    }
+
+    IEnumerator DigStrikeCoroutine(Vector2 surfacePoint, Vector2 surfaceNormal, Collider2D surfaceCollider, float windUpDist, float strikeSpeed, float digRadius, float windUpTime, float recoveryTime)
+    {
+        isDigStriking = true;
+        isPlanted = false;
+
+        // Clear old surface tracking so SyncToSurface doesn't snap the foot
+        // back to the old attachment point when we replant
+        plantedTransform = null;
+        plantedRb = null;
+
+        Vector2 startPos = currentFootPos;
+
+        // The "ready" position is just above the surface at the strike point
+        Vector2 readyPos = surfacePoint + surfaceNormal * (windUpDist * 0.3f);
+        // The "wound up" position is further above the surface (full wind-up height)
+        Vector2 windUpPos = surfacePoint + surfaceNormal * windUpDist;
+
+        // ── Phase 1: Reach ──
+        // Move the foot from its current planted position to the ready position above the strike point
+        float reachDist = Vector2.Distance(startPos, readyPos);
+        float reachTime = reachDist / Mathf.Max(1f, strikeSpeed * 0.5f);
+        float t = 0f;
+        while (t < 1f)
+        {
+            t += Time.deltaTime / Mathf.Max(0.01f, reachTime);
+            if (t > 1f) t = 1f;
+            float ease = t * t * (3f - 2f * t); // smoothstep
+            currentFootPos = Vector2.Lerp(startPos, readyPos, ease);
+            yield return null;
+        }
+        currentFootPos = readyPos;
+
+        // ── Phase 2: Wind-Up ──
+        // Retract the foot AWAY from the surface along the normal (builds anticipation)
+        t = 0f;
+        while (t < 1f)
+        {
+            t += Time.deltaTime / Mathf.Max(0.01f, windUpTime);
+            if (t > 1f) t = 1f;
+            // Ease-out for snappy retraction feel
+            float ease = 1f - (1f - t) * (1f - t);
+            currentFootPos = Vector2.Lerp(readyPos, windUpPos, ease);
+            yield return null;
+        }
+        currentFootPos = windUpPos;
+
+        // ── Phase 3: Strike ──
+        // Slam the foot INTO the surface (against the normal)
+        // Use a single full-distance raycast from the wind-up position to guarantee detection
+        Vector2 strikeDir = -surfaceNormal;
+        float fullStrikeDist = windUpDist + 1f; // slightly past surface for guaranteed hit
+        float strikeTime = windUpDist / Mathf.Max(1f, strikeSpeed);
+        t = 0f;
+
+        // Pre-detect the actual impact point with a single reliable raycast
+        Vector2 impactPoint = surfacePoint;
+        RaycastHit2D preHit = Physics2D.Raycast(windUpPos, strikeDir, fullStrikeDist, controller.attachableLayers);
+        if (preHit.collider != null)
+        {
+            int webLayer = LayerMask.NameToLayer("Web");
+            if (preHit.collider.gameObject.layer != webLayer)
+                impactPoint = preHit.point;
+        }
+
+        // Animate the foot moving from wind-up to impact
+        while (t < 1f)
+        {
+            t += Time.deltaTime / Mathf.Max(0.01f, strikeTime);
+            if (t > 1f) t = 1f;
+            // Ease-in for accelerating punch feel
+            float ease = t * t;
+            currentFootPos = Vector2.Lerp(windUpPos, impactPoint, ease);
+            yield return null;
+        }
+        currentFootPos = impactPoint;
+
+        // ── Phase 4: Impact ──
+        // Always mine using the collider we already know about from HandleDigging
+        if (surfaceCollider != null)
+        {
+            var terrain = surfaceCollider.GetComponent<DestructibleTerrain>();
+            if (terrain != null)
+            {
+                terrain.MineHole(impactPoint, digRadius);
+            }
+
+            // Apply an impulse kick to any rigidbody at the impact site
+            var impactRb = surfaceCollider.GetComponentInParent<Rigidbody2D>();
+            if (impactRb != null && impactRb != controller.headRb)
+            {
+                impactRb.AddForceAtPosition(-surfaceNormal * controller.headRb.mass * 3f, impactPoint, ForceMode2D.Impulse);
+            }
+        }
+
+        // Small pause at impact for visual weight
+        yield return new WaitForSeconds(0.05f);
+
+        // ── Phase 5: Recovery ──
+        // Always animate at the normal foot movement speed — never teleport
+        Vector2 recoveryTarget;
+
+        if (controller.isDigging)
+        {
+            // Still digging — lift just above the impact site, ready for the next strike
+            recoveryTarget = impactPoint + surfaceNormal * 0.5f;
+        }
+        else
+        {
+            // Digging stopped — find a new surface attachment nearby
+            // (terrain may have been mined away from the original position)
+            Vector2 searchOrigin = impactPoint + surfaceNormal * (windUpDist * 0.5f);
+            RaycastHit2D recoveryHit = Physics2D.Raycast(searchOrigin, -surfaceNormal, windUpDist, controller.attachableLayers);
+
+            if (recoveryHit.collider != null)
+            {
+                recoveryTarget = recoveryHit.point;
+                plantedNormal = recoveryHit.normal;
+            }
+            else
+            {
+                recoveryTarget = startPos;
+            }
+        }
+
+        // Animate to the recovery target at step speed
+        Vector2 recoveryStart = currentFootPos;
+        float recoveryDist = Vector2.Distance(recoveryStart, recoveryTarget);
+        float recoveryDuration = recoveryDist / Mathf.Max(1f, controller.stepSpeed);
+        t = 0f;
+        while (t < 1f)
+        {
+            t += Time.deltaTime / Mathf.Max(0.01f, recoveryDuration);
+            if (t > 1f) t = 1f;
+            float ease = t * t * (3f - 2f * t); // smoothstep
+            currentFootPos = Vector2.Lerp(recoveryStart, recoveryTarget, ease);
+            yield return null;
+        }
+
+        currentFootPos = recoveryTarget;
+        targetFootPos = recoveryTarget;
+        isPlanted = true;
+        plantedTimer = 0f;
+        isDigStriking = false;
     }
 
     // ───────────────────────────────────────────────────────────

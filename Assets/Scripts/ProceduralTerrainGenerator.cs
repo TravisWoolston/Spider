@@ -63,7 +63,8 @@ public class ProceduralTerrainGenerator : MonoBehaviour
         PathsD subjectPaths = new PathsD() { baseBlock };
         PathsD clipPaths = new PathsD();
 
-        // 2. Cut Surface
+        // 2. Cut Surface & store surface profile for shadow caster
+        Vector2[] surfacePoints = null;
         if (generateSurface)
         {
             int steps = Mathf.CeilToInt(width / resolution);
@@ -72,14 +73,19 @@ public class ProceduralTerrainGenerator : MonoBehaviour
             surfaceClip.Add(new PointD(-1f, height + 1f));
             surfaceClip.Add(new PointD(width + 1f, height + 1f));
 
+            // Store surface points left-to-right for shadow caster
+            surfacePoints = new Vector2[steps + 1];
+
             for (int i = steps; i >= 0; i--)
             {
                 float x = Mathf.Clamp(i * resolution, 0f, width);
                 float y = -surfaceDepth + Mathf.PerlinNoise(x * surfaceFrequency + seed, seed) * surfaceAmplitude;
                 surfaceClip.Add(new PointD(x, y));
+                surfacePoints[steps - i] = new Vector2(x, y); // left-to-right order
             }
             clipPaths.Add(surfaceClip);
         }
+
 
         // 3. Cut Caves - ORGANIC SHAPES
         if (generateCaves)
@@ -206,6 +212,7 @@ public class ProceduralTerrainGenerator : MonoBehaviour
         DestructibleTerrain dt = GetComponent<DestructibleTerrain>();
         if (dt != null)
         {
+            dt.SetSurfaceProfile(surfacePoints, height);
             dt.EnsureVisuals();
             dt.UpdateMesh();
             dt.UpdateShadowCaster();

@@ -3,9 +3,17 @@ using UnityEngine.Rendering.Universal;
 using Clipper2Lib;
 using System.Collections.Generic;
 
-[RequireComponent(typeof(PolygonCollider2D))]
+/// <summary>
+/// This component now acts as a Chunk Manager.
+/// It creates and manages a grid of DestructibleTerrainChunk children to localized 
+/// physics and mesh updates, preventing big frame freezes.
+/// </summary>
 public class DestructibleTerrain : MonoBehaviour
 {
+    [Header("Chunking Settings")]
+    public float chunkSize = 10f;
+    public GameObject chunkPrefab; // Optional, will auto-create if null
+
     [Header("Visuals")]
     public Color terrainColor = new Color(0.35f, 0.22f, 0.13f, 1f);
     public Material customMaterial;
@@ -15,345 +23,253 @@ public class DestructibleTerrain : MonoBehaviour
     public int sortingOrder = 0;
 
     [Header("Shadow Caster (Surface Only)")]
-    [Tooltip("Creates a child shadow proxy that casts shadows from the terrain surface profile")]
-    public bool enableShadowCaster = true;
-    [Tooltip("Minimum seconds between shadow updates during mining")]
-    public float shadowUpdateCooldown = 0.5f;
+    [Tooltip("Uses the 'Infinite Top' shadow logic - very cheap, clean shadows from the surface only.")]
+    public bool enableSurfaceShadowProxy = true;
 
-    private PolygonCollider2D col;
-    private MeshFilter meshFilter;
-    private MeshRenderer meshRenderer;
-    private Mesh cachedMesh;
-    private float lastShadowUpdateTime = -999f;
-
-    // Shadow proxy
+    private Dictionary<Vector2Int, DestructibleTerrainChunk> chunks = new Dictionary<Vector2Int, DestructibleTerrainChunk>();
+    
+    // For the surface shadow proxy
     private GameObject shadowProxy;
     private PolygonCollider2D shadowCollider;
     private ShadowCaster2D shadowCaster;
-
-    // Surface profile from ProceduralTerrainGenerator
     private Vector2[] surfaceProfile;
-    private float terrainHeight;
 
-    void Start()
+    void Awake()
     {
-        col = GetComponent<PolygonCollider2D>();
-        EnsureVisuals();
-        UpdateMesh();
-        UpdateShadowCaster();
+        // The chunks dictionary is not serialized, so rebuild it from any
+        // chunk children that were persisted in the scene from editor generation.
+        RebuildChunkDictionary();
     }
 
     /// <summary>
-    /// Called by ProceduralTerrainGenerator after generation.
-    /// Stores the smooth surface profile for shadow casting.
+    /// Scan child GameObjects for DestructibleTerrainChunk components and
+    /// rebuild the lookup dictionary from their names (Chunk_X_Y).
     /// </summary>
-    public void SetSurfaceProfile(Vector2[] profile, float height)
+    private void RebuildChunkDictionary()
+    {
+        chunks.Clear();
+        for (int i = 0; i < transform.childCount; i++)
+        {
+            var child = transform.GetChild(i);
+            var chunk = child.GetComponent<DestructibleTerrainChunk>();
+            if (chunk == null) continue;
+
+            // Parse the grid key from the name: "Chunk_X_Y"
+            string[] parts = child.name.Split('_');
+            if (parts.Length >= 3
+                && int.TryParse(parts[1], out int x)
+                && int.TryParse(parts[2], out int y))
+            {
+                chunks[new Vector2Int(x, y)] = chunk;
+            }
+        }
+
+        if (chunks.Count > 0)
+            Debug.Log($"[DestructibleTerrain] Rebuilt dictionary: {chunks.Count} chunks found from scene hierarchy.");
+    }
+
+    /// <summary>
+    /// Split the generated terrain into chunks.
+    /// </summary>
+    public void SetGeneratorResults(Vector2[] profile, float height, PathsD paths)
     {
         surfaceProfile = profile;
-        terrainHeight = height;
+        ClearChunks();
+
+        // Find total bounds to determine grid size
+        RectD bounds = Clipper.GetBounds(paths);
+        int minX = Mathf.FloorToInt((float)bounds.left / chunkSize);
+        int maxX = Mathf.CeilToInt((float)bounds.right / chunkSize);
+        int minY = Mathf.FloorToInt((float)bounds.top / chunkSize);
+        int maxY = Mathf.CeilToInt((float)bounds.bottom / chunkSize);
+
+        Debug.Log($"[DestructibleTerrain] Splitting {paths.Count} paths into chunks. Bounds: {bounds.left},{bounds.bottom} to {bounds.right},{bounds.top}");
+        int chunkCount = 0;
+
+        for (int x = minX; x < maxX; x++)
+        {
+            for (int y = minY; y < maxY; y++)
+            {
+                // Create a slightly expanded rectangle for intersecting to prevent seams
+                float bleed = 0.05f; 
+                PathD chunkRectPath = new PathD(4);
+                chunkRectPath.Add(new PointD(x * chunkSize - bleed, y * chunkSize - bleed));
+                chunkRectPath.Add(new PointD((x + 1) * chunkSize + bleed, y * chunkSize - bleed));
+                chunkRectPath.Add(new PointD((x + 1) * chunkSize + bleed, (y + 1) * chunkSize + bleed));
+                chunkRectPath.Add(new PointD(x * chunkSize - bleed, (y + 1) * chunkSize + bleed));
+
+                // Use Intersect (standard boolean op) which is more reliable for complex holes than RectClip
+                PathsD chunkPaths = Clipper.Intersect(paths, new PathsD { chunkRectPath }, FillRule.NonZero, 2);
+                
+                if (chunkPaths.Count > 0)
+                {
+                    DestructibleTerrainChunk chunk = GetOrCreateChunk(x, y);
+                    chunk.Initialize(chunkPaths, terrainColor, customMaterial, sortingLayerName, sortingOrder);
+                    chunkCount++;
+                }
+            }
+        }
+
+        Debug.Log($"[DestructibleTerrain] Total Paths: {paths.Count}. Master Bounds: {bounds.left},{bounds.top} to {bounds.right},{bounds.bottom}. Generated {chunkCount} chunks.");
+
+        // Disable the parent's own PolygonCollider2D (if any) — chunks now own collision.
+        // The old RequireComponent on ProceduralTerrainGenerator creates one, but it's stale
+        // and would intercept raycasts meant for chunk colliders.
+        var parentCol = GetComponent<PolygonCollider2D>();
+        if (parentCol != null) parentCol.enabled = false;
+
+        if (enableSurfaceShadowProxy) UpdateShadowCaster();
     }
 
-    #region Visual Mesh Setup
-
-    public void EnsureVisuals()
+    private DestructibleTerrainChunk GetOrCreateChunk(int x, int y)
     {
-        if (col == null) col = GetComponent<PolygonCollider2D>();
+        Vector2Int key = new Vector2Int(x, y);
+        if (chunks.TryGetValue(key, out var chunk)) return chunk;
 
-        SpriteRenderer sr = GetComponent<SpriteRenderer>();
-        if (sr != null)
-        {
-            sortingLayerName = sr.sortingLayerName;
-            sortingOrder = sr.sortingOrder;
-            sr.enabled = false;
-        }
+        GameObject go = new GameObject($"Chunk_{x}_{y}");
+        go.transform.SetParent(transform, false);
+        go.transform.localPosition = Vector3.zero;
+        go.transform.localRotation = Quaternion.identity;
+        go.layer = gameObject.layer;
 
-        Transform child = transform.Find("CleanTerrainMesh");
-        if (child == null)
-        {
-            GameObject visualChild = new GameObject("CleanTerrainMesh");
-            visualChild.transform.SetParent(transform, false);
-            visualChild.transform.localPosition = Vector3.zero;
-            visualChild.transform.localRotation = Quaternion.identity;
-            visualChild.layer = gameObject.layer;
-            child = visualChild.transform;
-        }
-
-        meshFilter = child.GetComponent<MeshFilter>();
-        if (meshFilter == null) meshFilter = child.gameObject.AddComponent<MeshFilter>();
-
-        meshRenderer = child.GetComponent<MeshRenderer>();
-        if (meshRenderer == null) meshRenderer = child.gameObject.AddComponent<MeshRenderer>();
-
-        meshRenderer.sortingLayerName = sortingLayerName;
-        meshRenderer.sortingOrder = sortingOrder;
-
-        if (meshRenderer.sharedMaterial == null)
-        {
-            if (customMaterial != null)
-            {
-                meshRenderer.sharedMaterial = customMaterial;
-            }
-            else
-            {
-                Shader shader = Shader.Find("Sprites/Default");
-                if (shader == null) shader = Shader.Find("Universal Render Pipeline/2D/Sprite-Lit-Default");
-                if (shader == null) shader = Shader.Find("Unlit/Color");
-
-                meshRenderer.sharedMaterial = new Material(shader);
-            }
-        }
-
-        MaterialPropertyBlock block = new MaterialPropertyBlock();
-        meshRenderer.GetPropertyBlock(block);
-        if (meshRenderer.sharedMaterial.mainTexture == null)
-        {
-            block.SetTexture("_MainTex", Texture2D.whiteTexture);
-            block.SetTexture("_BaseMap", Texture2D.whiteTexture);
-        }
-        block.SetColor("_Color", terrainColor);
-        block.SetColor("_BaseColor", terrainColor);
-        meshRenderer.SetPropertyBlock(block);
+        chunk = go.AddComponent<DestructibleTerrainChunk>();
+        chunks[key] = chunk;
+        return chunk;
     }
 
-    #endregion
-
-    #region Terrain Modification
+    private void ClearChunks()
+    {
+        // Destroy ALL chunk children — not just dictionary-tracked ones.
+        // Editor-time generation serializes chunks into the scene, but at Play mode
+        // the dictionary is fresh/empty, so we'd miss those stale GameObjects.
+        var toDestroy = new List<GameObject>();
+        for (int i = transform.childCount - 1; i >= 0; i--)
+        {
+            var child = transform.GetChild(i);
+            // Destroy anything that's a chunk or has a broken script ref from before
+            if (child.GetComponent<DestructibleTerrainChunk>() != null
+                || child.name.StartsWith("Chunk_"))
+            {
+                toDestroy.Add(child.gameObject);
+            }
+        }
+        foreach (var go in toDestroy)
+        {
+            if (Application.isPlaying) Destroy(go);
+            else DestroyImmediate(go);
+        }
+        chunks.Clear();
+    }
 
     public void MineHole(Vector2 worldPos, float radius, int circleSegments = 16)
     {
-        EnsureVisuals();
         Vector2 localPos = transform.InverseTransformPoint(worldPos);
+        
+        // Find chunks in range
+        int startX = Mathf.FloorToInt((localPos.x - radius) / chunkSize);
+        int endX = Mathf.FloorToInt((localPos.x + radius) / chunkSize);
+        int startY = Mathf.FloorToInt((localPos.y - radius) / chunkSize);
+        int endY = Mathf.FloorToInt((localPos.y + radius) / chunkSize);
 
-        PathD clipPath = new PathD();
-        for (int i = circleSegments; i >= 0; i--)
+        int hitCount = 0;
+        for (int x = startX; x <= endX; x++)
         {
-            float angle = (i * Mathf.PI * 2f) / circleSegments;
-            Vector2 p = new Vector2(Mathf.Cos(angle), Mathf.Sin(angle)) * radius + localPos;
-            clipPath.Add(new PointD(p.x, p.y));
-        }
-        PathsD clipPaths = new PathsD() { clipPath };
-
-        PathsD subjectPaths = new PathsD();
-        for (int i = 0; i < col.pathCount; i++)
-        {
-            Vector2[] currentPath = col.GetPath(i);
-            PathD path = new PathD();
-            foreach (Vector2 p in currentPath)
-                path.Add(new PointD(p.x, p.y));
-
-            subjectPaths.Add(path);
-        }
-
-        PathsD solution = Clipper.Difference(subjectPaths, clipPaths, FillRule.NonZero, 2);
-
-        col.pathCount = solution.Count;
-        for (int i = 0; i < solution.Count; i++)
-        {
-            PathD resultPath = solution[i];
-            Vector2[] newPath = new Vector2[resultPath.Count];
-            for (int j = 0; j < resultPath.Count; j++)
+            for (int y = startY; y <= endY; y++)
             {
-                newPath[j] = new Vector2((float)resultPath[j].x, (float)resultPath[j].y);
+                if (chunks.TryGetValue(new Vector2Int(x, y), out var chunk))
+                {
+                    chunk.MineHole(localPos, radius, circleSegments);
+                    hitCount++;
+                }
             }
-            col.SetPath(i, newPath);
         }
 
-        UpdateMesh();
-
-        if (enableShadowCaster && Time.time - lastShadowUpdateTime > shadowUpdateCooldown)
+        if (hitCount == 0)
         {
-            UpdateShadowCaster();
-            lastShadowUpdateTime = Time.time;
+            Debug.LogWarning($"[DestructibleTerrain] Dig at local {localPos} (world {worldPos}) missed all chunks. Grid range: ({startX},{startY})-({endX},{endY}). Tracked chunks: {chunks.Count}");
         }
     }
 
-    public void UpdateMesh()
-    {
-        EnsureVisuals();
-        if (col == null || meshFilter == null) return;
+    public void EnsureVisuals() { /* Handled by chunks */ }
+    public void UpdateMesh() { /* Handled by chunks */ }
 
-        if (cachedMesh != null)
-        {
-            if (Application.isPlaying)
-                Destroy(cachedMesh);
-            else
-                DestroyImmediate(cachedMesh);
-            cachedMesh = null;
-        }
+    #region Surface Shadow Proxy
 
-        Mesh mesh = col.CreateMesh(true, true);
-
-        if (mesh != null)
-        {
-            Vector3[] vertices = mesh.vertices;
-            Vector2[] uvs = new Vector2[vertices.Length];
-            Color[] colors = new Color[vertices.Length];
-            Vector3[] normals = new Vector3[vertices.Length];
-
-            for (int i = 0; i < vertices.Length; i++)
-            {
-                Vector3 worldPos = vertices[i];
-                Vector3 localPos = transform.InverseTransformPoint(worldPos);
-
-                vertices[i] = new Vector3(localPos.x, localPos.y, 0f);
-                uvs[i] = new Vector2(worldPos.x * 0.2f, worldPos.y * 0.2f);
-                colors[i] = terrainColor;
-                normals[i] = new Vector3(0, 0, -1f);
-            }
-
-            mesh.vertices = vertices;
-            mesh.uv = uvs;
-            mesh.colors = colors;
-            mesh.normals = normals;
-
-            int[] triangles = mesh.triangles;
-            for (int i = 0; i < triangles.Length; i += 3)
-            {
-                int temp = triangles[i + 1];
-                triangles[i + 1] = triangles[i + 2];
-                triangles[i + 2] = temp;
-            }
-            mesh.triangles = triangles;
-            mesh.RecalculateBounds();
-        }
-
-        cachedMesh = mesh;
-        meshFilter.sharedMesh = mesh;
-    }
-
-    #endregion
-
-    #region Shadow Proxy (Surface Only)
-
-    /// <summary>
-    /// Builds a shadow caster from the stored surface profile.
-    /// The polygon is: bottom-left → surface (left to right) → bottom-right.
-    /// This creates a solid shape where only the surface edge casts visible shadows,
-    /// blocking light from penetrating underground.
-    /// </summary>
     public void UpdateShadowCaster()
     {
-        if (!enableShadowCaster)
+        if (!enableSurfaceShadowProxy || surfaceProfile == null || surfaceProfile.Length < 2)
         {
             DestroyShadowProxy();
             return;
         }
 
-        if (surfaceProfile == null || surfaceProfile.Length < 2) return;
-
         EnsureShadowProxy();
 
-        Vector2[] shape = BuildSurfaceShadowShape();
-        if (shape == null || shape.Length < 3)
-        {
-            shadowCollider.pathCount = 0;
-            return;
-        }
+        float minX = surfaceProfile[0].x;
+        float maxX = surfaceProfile[surfaceProfile.Length - 1].x;
+
+        float lowestY = surfaceProfile[0].y;
+        for (int i = 1; i < surfaceProfile.Length; i++)
+            if (surfaceProfile[i].y < lowestY) lowestY = surfaceProfile[i].y;
+        
+        float bottomY = lowestY - 1f;
+
+        Vector2[] shape = new Vector2[surfaceProfile.Length + 2];
+        shape[0] = new Vector2(minX, bottomY);
+        for (int i = 0; i < surfaceProfile.Length; i++)
+            shape[i+1] = surfaceProfile[i];
+        shape[surfaceProfile.Length + 1] = new Vector2(maxX, bottomY);
 
         shadowCollider.pathCount = 1;
         shadowCollider.SetPath(0, shape);
     }
 
-    /// <summary>
-    /// Builds a thin polygon strip along the surface profile.
-    /// The bottom sits just below the lowest surface point so the terrain mesh
-    /// hides the bottom/side edges. Only the surface edge casts visible shadows.
-    /// </summary>
-    private Vector2[] BuildSurfaceShadowShape()
-    {
-        float minX = surfaceProfile[0].x;
-        float maxX = surfaceProfile[surfaceProfile.Length - 1].x;
-
-        // Find the lowest surface point and extend just below it
-        float lowestY = surfaceProfile[0].y;
-        for (int i = 1; i < surfaceProfile.Length; i++)
-        {
-            if (surfaceProfile[i].y < lowestY)
-                lowestY = surfaceProfile[i].y;
-        }
-        float bottomY = lowestY - 1f; // Thin strip — hidden behind terrain mesh
-
-        // Shape: bottom-left, surface points (left to right), bottom-right
-        // Winding: up → right → down → left = counter-clockwise
-        Vector2[] shape = new Vector2[surfaceProfile.Length + 2];
-
-        shape[0] = new Vector2(minX, bottomY);                     // bottom-left
-
-        for (int i = 0; i < surfaceProfile.Length; i++)
-            shape[i + 1] = surfaceProfile[i];                     // surface, left to right
-
-        shape[surfaceProfile.Length + 1] = new Vector2(maxX, bottomY); // bottom-right
-
-        return shape;
-    }
-
     private void EnsureShadowProxy()
     {
-        if (shadowProxy != null && shadowCollider != null && shadowCaster != null) return;
-
-        Transform existing = transform.Find("ShadowProxy");
-        if (existing != null)
-        {
-            shadowProxy = existing.gameObject;
-        }
+        if (shadowProxy != null) return;
+        Transform existing = transform.Find("SurfaceShadowProxy");
+        if (existing != null) shadowProxy = existing.gameObject;
         else
         {
-            shadowProxy = new GameObject("ShadowProxy");
+            shadowProxy = new GameObject("SurfaceShadowProxy");
             shadowProxy.transform.SetParent(transform, false);
             shadowProxy.transform.localPosition = Vector3.zero;
-            shadowProxy.transform.localRotation = Quaternion.identity;
-            shadowProxy.transform.localScale = Vector3.one;
             shadowProxy.layer = gameObject.layer;
         }
 
         shadowCollider = shadowProxy.GetComponent<PolygonCollider2D>();
-        if (shadowCollider == null)
-            shadowCollider = shadowProxy.AddComponent<PolygonCollider2D>();
+        if (!shadowCollider) shadowCollider = shadowProxy.AddComponent<PolygonCollider2D>();
         shadowCollider.isTrigger = true;
 
         shadowCaster = shadowProxy.GetComponent<ShadowCaster2D>();
-        if (shadowCaster == null)
-            shadowCaster = shadowProxy.AddComponent<ShadowCaster2D>();
+        if (!shadowCaster) shadowCaster = shadowProxy.AddComponent<ShadowCaster2D>();
     }
 
     private void DestroyShadowProxy()
     {
-        if (shadowProxy == null) return;
-
-        if (Application.isPlaying)
-            Destroy(shadowProxy);
-        else
-            DestroyImmediate(shadowProxy);
-
-        shadowProxy = null;
-        shadowCollider = null;
-        shadowCaster = null;
-    }
-
-    #endregion
-
-    #region Cleanup
-
-    void OnDestroy()
-    {
-        if (cachedMesh != null)
+        if (shadowProxy)
         {
-            if (Application.isPlaying)
-                Destroy(cachedMesh);
-            else
-                DestroyImmediate(cachedMesh);
-            cachedMesh = null;
+            if (Application.isPlaying) Destroy(shadowProxy);
+            else DestroyImmediate(shadowProxy);
         }
     }
 
-    void OnDisable()
+    private void OnDrawGizmosSelected()
     {
-        if (cachedMesh != null && Application.isPlaying)
+        Gizmos.color = Color.yellow;
+        Gizmos.DrawWireCube(transform.position + new Vector3(chunkSize * 1f, -chunkSize * 1f, 0), new Vector3(chunkSize * 2f, chunkSize * 2f, 1));
+        
+        if (chunks != null)
         {
-            Destroy(cachedMesh);
-            cachedMesh = null;
+            Gizmos.color = new Color(0, 1, 0, 0.2f);
+            foreach (var kvp in chunks)
+            {
+                Vector3 pos = transform.position + new Vector3(kvp.Key.x * chunkSize + chunkSize * 0.5f, kvp.Key.y * chunkSize + chunkSize * 0.5f, 0);
+                Gizmos.DrawWireCube(pos, new Vector3(chunkSize, chunkSize, 0));
+            }
         }
     }
 
     #endregion
 }
+

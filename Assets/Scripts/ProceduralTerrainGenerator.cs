@@ -2,7 +2,7 @@ using UnityEngine;
 using Clipper2Lib;
 using System.Collections.Generic;
 
-[RequireComponent(typeof(PolygonCollider2D))]
+
 [RequireComponent(typeof(DestructibleTerrain))]
 public class ProceduralTerrainGenerator : MonoBehaviour
 {
@@ -51,8 +51,6 @@ public class ProceduralTerrainGenerator : MonoBehaviour
     [ContextMenu("Generate Terrain")]
     public void Generate()
     {
-        PolygonCollider2D col = GetComponent<PolygonCollider2D>();
-
         // 1. Create Base Solid Block
         PathD baseBlock = new PathD(4);
         baseBlock.Add(new PointD(0, 0));
@@ -195,27 +193,11 @@ public class ProceduralTerrainGenerator : MonoBehaviour
             Debug.Log($"[ProceduralTerrain] Filtered to {solution.Count} paths (removed tiny islands)");
         }
 
-        // 9. Apply to Unity Physics
-        col.pathCount = solution.Count;
-        for (int i = 0; i < solution.Count; i++)
-        {
-            PathD resultPath = solution[i];
-            Vector2[] newPath = new Vector2[resultPath.Count];
-            for (int j = 0; j < resultPath.Count; j++)
-            {
-                newPath[j] = new Vector2((float)resultPath[j].x, (float)resultPath[j].y);
-            }
-            col.SetPath(i, newPath);
-        }
-
-        // 10. Force Visuals to Update
+        // 9. Force Visuals to Update on Manager (Manager handles chunks and shadow)
         DestructibleTerrain dt = GetComponent<DestructibleTerrain>();
         if (dt != null)
         {
-            dt.SetSurfaceProfile(surfacePoints, height);
-            dt.EnsureVisuals();
-            dt.UpdateMesh();
-            dt.UpdateShadowCaster();
+            dt.SetGeneratorResults(surfacePoints, height, solution);
         }
     }
 }

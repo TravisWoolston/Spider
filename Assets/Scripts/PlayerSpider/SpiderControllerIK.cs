@@ -729,15 +729,16 @@ public class SpiderControllerIK : MonoBehaviour
         float mouseDistFromHead = Vector2.Distance(mousePos, headPos);
         if (mouseDistFromHead > legExtensionMax * 1.2f) return;
 
-        // Raycast straight down from above the mouse to find the surface directly under cursor
-        LayerMask digMask = attachableLayers & ~(1 << dirtLayer);
-        RaycastHit2D surfaceHit = Physics2D.Raycast(mousePos + Vector2.up * 5f, Vector2.down, 10f, digMask);
+        // Raycast to find the terrain surface under the mouse cursor.
+        // Chunks are on the same layer as the terrain parent (typically Default),
+        // so attachableLayers should already include them.
+        RaycastHit2D surfaceHit = Physics2D.Raycast(mousePos + Vector2.up * 5f, Vector2.down, 10f, attachableLayers);
 
         // Fallback: raycast from head toward mouse
         if (surfaceHit.collider == null)
         {
             Vector2 rayDir = (mousePos - headPos).normalized;
-            surfaceHit = Physics2D.Raycast(headPos, rayDir, mouseDistFromHead + 5f, digMask);
+            surfaceHit = Physics2D.Raycast(headPos, rayDir, mouseDistFromHead + 5f, attachableLayers);
         }
 
         if (surfaceHit.collider == null) return;

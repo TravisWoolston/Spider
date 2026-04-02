@@ -527,7 +527,7 @@ public class SpiderLegIK : MonoBehaviour
         // Always mine using the collider we already know about from HandleDigging
         if (surfaceCollider != null)
         {
-            var terrain = surfaceCollider.GetComponent<DestructibleTerrain>();
+            var terrain = surfaceCollider.GetComponentInParent<DestructibleTerrain>();
             if (terrain != null)
             {
                 terrain.MineHole(impactPoint, digRadius);

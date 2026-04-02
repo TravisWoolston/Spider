@@ -1,4 +1,5 @@
 using UnityEngine;
+using UnityEngine.Rendering.Universal;
 using Clipper2Lib;
 
 /// <summary>
@@ -15,6 +16,49 @@ public class DestructibleTerrainChunk : MonoBehaviour
     private Color terrainColor;
     private bool dirty = false;
     private Mesh cachedMesh;
+
+    // Depth-based vertex darkening settings
+    private float fogFadeEnd = 5f;
+    private float fogOpacity = 0.95f;
+    private float fogAggressiveness = 1f;
+    private bool fogEnabled = true;
+    private Vector2 sunDirection = new Vector2(0.5f, -1f);
+    private Vector2 sunOrigin = Vector2.zero;
+    private float sunMinProjection = 0f;
+    private float sunMaxProjection = 1f;
+
+    public void SetFogSettings(float fadeDistance, float opacity)
+    {
+        fogFadeEnd = fadeDistance;
+        fogOpacity = opacity;
+    }
+
+    public void SetFogAggressiveness(float aggressiveness)
+    {
+        fogAggressiveness = Mathf.Max(0.01f, aggressiveness);
+    }
+
+    public void SetFogEnabled(bool enabled)
+    {
+        fogEnabled = enabled;
+    }
+
+    public void SetSunDirection(Vector2 direction)
+    {
+        if (direction.sqrMagnitude < 0.0001f) direction = new Vector2(0.5f, -1f);
+        sunDirection = direction.normalized;
+    }
+
+    public void SetSunOrigin(Vector2 origin)
+    {
+        sunOrigin = origin;
+    }
+
+    public void SetSunProjectionRange(float minProjection, float maxProjection)
+    {
+        sunMinProjection = minProjection;
+        sunMaxProjection = maxProjection;
+    }
 
     public void Initialize(PathsD paths, Color color, Material mat, string layer, int order)
     {
@@ -38,14 +82,12 @@ public class DestructibleTerrainChunk : MonoBehaviour
         meshRenderer.sortingLayerName = layer;
         meshRenderer.sortingOrder = order;
 
-        MaterialPropertyBlock block = new MaterialPropertyBlock();
-        meshRenderer.GetPropertyBlock(block);
-        block.SetColor("_Color", terrainColor);
-        block.SetColor("_BaseColor", terrainColor);
-        meshRenderer.SetPropertyBlock(block);
-
         SyncCollider();
         UpdateMesh();
+
+        // Add per-chunk shadow caster — uses the PolygonCollider2D as shape source
+        var shadowCaster = gameObject.GetComponent<ShadowCaster2D>();
+        if (!shadowCaster) shadowCaster = gameObject.AddComponent<ShadowCaster2D>();
     }
 
     /// <summary>
@@ -155,6 +197,29 @@ public class DestructibleTerrainChunk : MonoBehaviour
             Debug.LogWarning($"[Chunk {name}] Triangulate success but 0 triangles returned.");
         }
 
+        // Build edge segments for distance-to-boundary calculation
+        int totalSegments = 0;
+        foreach (var path in myPaths)
+            totalSegments += path.Count;
+
+        Vector2[] segA = new Vector2[totalSegments];
+        Vector2[] segB = new Vector2[totalSegments];
+        int segIdx = 0;
+        foreach (var path in myPaths)
+        {
+            int count = path.Count;
+            for (int s = 0; s < count; s++)
+            {
+                int next = (s + 1) % count;
+                segA[segIdx] = new Vector2((float)path[s].x, (float)path[s].y);
+                segB[segIdx] = new Vector2((float)path[next].x, (float)path[next].y);
+                segIdx++;
+            }
+        }
+
+        float invFadeEnd = fogFadeEnd > 0f ? 1f / fogFadeEnd : 1f;
+        Vector2 lightDir = -sunDirection.normalized;
+
         int triCount = triangles.Count;
         Vector3[] vertices = new Vector3[triCount * 3];
         int[] indices = new int[triCount * 3];
@@ -173,10 +238,38 @@ public class DestructibleTerrainChunk : MonoBehaviour
                 int idx = i * 3 + v;
                 int vIdx = isPositive ? (2 - v) : v;
 
-                vertices[idx] = new Vector3((float)tri[vIdx].x, (float)tri[vIdx].y, 0);
-                uvs[idx] = new Vector2(vertices[idx].x * 0.2f, vertices[idx].y * 0.2f);
-                colors[idx] = terrainColor;
+                float px = (float)tri[vIdx].x;
+                float py = (float)tri[vIdx].y;
+                vertices[idx] = new Vector3(px, py, 0);
+                uvs[idx] = new Vector2(px * 0.2f, py * 0.2f);
                 indices[idx] = idx;
+
+                float brightness = 1f;
+                if (fogEnabled)
+                {
+                    // Compute distance to nearest polygon edge segment
+                    float minDistSqr = float.MaxValue;
+                    for (int e = 0; e < totalSegments; e++)
+                    {
+                        float distSqr = SqrDistToSegment(px, py, segA[e], segB[e]);
+                        if (distSqr < minDistSqr) minDistSqr = distSqr;
+                    }
+
+                    // 0 = on edge (full brightness), 1 = deep (darkened toward black)
+                    float depth = Mathf.Clamp01(Mathf.Sqrt(minDistSqr) * invFadeEnd);
+                    depth = Mathf.Pow(depth, fogAggressiveness);
+                    Vector2 worldPos = new Vector2(px, py);
+                    float projection = Vector2.Dot(worldPos - sunOrigin, -lightDir);
+                    float directional = Mathf.InverseLerp(sunMinProjection, sunMaxProjection, projection);
+                    brightness = Mathf.Clamp01((1f - depth * fogOpacity) * (0.6f + directional * 0.4f));
+                }
+
+                // Vertex colors always carry the terrain tint directly.
+                colors[idx] = new Color(
+                    terrainColor.r * brightness,
+                    terrainColor.g * brightness,
+                    terrainColor.b * brightness,
+                    1f);
             }
         }
 
@@ -194,6 +287,27 @@ public class DestructibleTerrainChunk : MonoBehaviour
         cachedMesh.RecalculateBounds();
         cachedMesh.RecalculateNormals();
         meshFilter.sharedMesh = cachedMesh;
+    }
+
+    /// <summary>
+    /// Squared distance from point (px,py) to the closest point on line segment AB.
+    /// </summary>
+    private static float SqrDistToSegment(float px, float py, Vector2 a, Vector2 b)
+    {
+        float abx = b.x - a.x;
+        float aby = b.y - a.y;
+        float apx = px - a.x;
+        float apy = py - a.y;
+
+        float dot = apx * abx + apy * aby;
+        float lenSqr = abx * abx + aby * aby;
+
+        // t = projection of P onto AB, clamped to [0,1]
+        float t = lenSqr > 0f ? Mathf.Clamp01(dot / lenSqr) : 0f;
+
+        float closestX = a.x + t * abx - px;
+        float closestY = a.y + t * aby - py;
+        return closestX * closestX + closestY * closestY;
     }
 
     private void OnDestroy()

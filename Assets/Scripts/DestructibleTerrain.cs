@@ -1,18 +1,17 @@
 using UnityEngine;
-using UnityEngine.Rendering.Universal;
 using Clipper2Lib;
 using System.Collections.Generic;
 
 /// <summary>
-/// This component now acts as a Chunk Manager.
-/// It creates and manages a grid of DestructibleTerrainChunk children to localized 
+/// Chunk Manager for destructible terrain.
+/// Creates and manages a grid of DestructibleTerrainChunk children to localize 
 /// physics and mesh updates, preventing big frame freezes.
+/// Each chunk gets its own ShadowCaster2D for per-chunk shadow casting.
 /// </summary>
 public class DestructibleTerrain : MonoBehaviour
 {
     [Header("Chunking Settings")]
     public float chunkSize = 10f;
-    public GameObject chunkPrefab; // Optional, will auto-create if null
 
     [Header("Visuals")]
     public Color terrainColor = new Color(0.35f, 0.22f, 0.13f, 1f);
@@ -22,17 +21,28 @@ public class DestructibleTerrain : MonoBehaviour
     public string sortingLayerName = "Default";
     public int sortingOrder = 0;
 
-    [Header("Shadow Caster (Surface Only)")]
-    [Tooltip("Uses the 'Infinite Top' shadow logic - very cheap, clean shadows from the surface only.")]
-    public bool enableSurfaceShadowProxy = true;
+    [Header("Sun")]
+    [Tooltip("Direction the sun/light comes from in world space. If empty, the current transform is used.")]
+    public Transform sunTransform;
+    [Tooltip("Fallback sun direction in world space when no sunTransform is assigned.")]
+    public Vector2 sunDirection = new Vector2(0.5f, -1f);
+
+    [Header("Fog Effects")]
+    public bool enableFogEffects = true;
+
+    [Header("Underground Fog")]
+    [Tooltip("Maximum distance from an edge before terrain is fully dark")]
+    public float fogFadeDistance = 5f;
+    [Tooltip("Darkness intensity (0 = invisible, 1 = fully opaque black)")]
+    [Range(0f, 1f)]
+    public float fogOpacity = 0.95f;
+
+    [Header("Fog Curve")]
+    [Tooltip("Higher values make the terrain darken sooner. 1 = linear, 2+ = much more aggressive.")]
+    [Range(0.2f, 4f)]
+    public float fogAggressiveness = 2f;
 
     private Dictionary<Vector2Int, DestructibleTerrainChunk> chunks = new Dictionary<Vector2Int, DestructibleTerrainChunk>();
-    
-    // For the surface shadow proxy
-    private GameObject shadowProxy;
-    private PolygonCollider2D shadowCollider;
-    private ShadowCaster2D shadowCaster;
-    private Vector2[] surfaceProfile;
 
     void Awake()
     {
@@ -71,13 +81,32 @@ public class DestructibleTerrain : MonoBehaviour
     /// <summary>
     /// Split the generated terrain into chunks.
     /// </summary>
-    public void SetGeneratorResults(Vector2[] profile, float height, PathsD paths)
+    public void SetGeneratorResults(PathsD paths)
     {
-        surfaceProfile = profile;
         ClearChunks();
 
-        // Find total bounds to determine grid size
+        Vector2 sunDir = GetSunDirection();
+        Vector2 sunOrigin = transform.InverseTransformPoint(sunTransform != null ? sunTransform.position : transform.position);
+
         RectD bounds = Clipper.GetBounds(paths);
+        Vector2[] corners = new Vector2[]
+        {
+            new Vector2((float)bounds.left, (float)bounds.top),
+            new Vector2((float)bounds.right, (float)bounds.top),
+            new Vector2((float)bounds.right, (float)bounds.bottom),
+            new Vector2((float)bounds.left, (float)bounds.bottom)
+        };
+        float minProj = float.MaxValue;
+        float maxProj = float.MinValue;
+        foreach (var c in corners)
+        {
+            float p = Vector2.Dot(c, -sunDir);
+            if (p < minProj) minProj = p;
+            if (p > maxProj) maxProj = p;
+        }
+        if (Mathf.Approximately(minProj, maxProj)) maxProj = minProj + 0.001f;
+
+        // Find total bounds to determine grid size
         int minX = Mathf.FloorToInt((float)bounds.left / chunkSize);
         int maxX = Mathf.CeilToInt((float)bounds.right / chunkSize);
         int minY = Mathf.FloorToInt((float)bounds.top / chunkSize);
@@ -104,21 +133,26 @@ public class DestructibleTerrain : MonoBehaviour
                 if (chunkPaths.Count > 0)
                 {
                     DestructibleTerrainChunk chunk = GetOrCreateChunk(x, y);
+                    chunk.SetFogEnabled(enableFogEffects);
+                    if (enableFogEffects)
+                    {
+                        chunk.SetFogSettings(fogFadeDistance, fogOpacity);
+                        chunk.SetFogAggressiveness(fogAggressiveness);
+                        chunk.SetSunDirection(sunDir);
+                        chunk.SetSunOrigin(sunOrigin);
+                        chunk.SetSunProjectionRange(minProj, maxProj);
+                    }
                     chunk.Initialize(chunkPaths, terrainColor, customMaterial, sortingLayerName, sortingOrder);
                     chunkCount++;
                 }
             }
         }
 
-        Debug.Log($"[DestructibleTerrain] Total Paths: {paths.Count}. Master Bounds: {bounds.left},{bounds.top} to {bounds.right},{bounds.bottom}. Generated {chunkCount} chunks.");
+        Debug.Log($"[DestructibleTerrain] Generated {chunkCount} chunks.");
 
         // Disable the parent's own PolygonCollider2D (if any) — chunks now own collision.
-        // The old RequireComponent on ProceduralTerrainGenerator creates one, but it's stale
-        // and would intercept raycasts meant for chunk colliders.
         var parentCol = GetComponent<PolygonCollider2D>();
         if (parentCol != null) parentCol.enabled = false;
-
-        if (enableSurfaceShadowProxy) UpdateShadowCaster();
     }
 
     private DestructibleTerrainChunk GetOrCreateChunk(int x, int y)
@@ -146,9 +180,9 @@ public class DestructibleTerrain : MonoBehaviour
         for (int i = transform.childCount - 1; i >= 0; i--)
         {
             var child = transform.GetChild(i);
-            // Destroy anything that's a chunk or has a broken script ref from before
             if (child.GetComponent<DestructibleTerrainChunk>() != null
-                || child.name.StartsWith("Chunk_"))
+                || child.name.StartsWith("Chunk_")
+                || child.name == "SurfaceShadowProxy")
             {
                 toDestroy.Add(child.gameObject);
             }
@@ -190,68 +224,11 @@ public class DestructibleTerrain : MonoBehaviour
         }
     }
 
-    public void EnsureVisuals() { /* Handled by chunks */ }
-    public void UpdateMesh() { /* Handled by chunks */ }
-
-    #region Surface Shadow Proxy
-
-    public void UpdateShadowCaster()
+    private Vector2 GetSunDirection()
     {
-        if (!enableSurfaceShadowProxy || surfaceProfile == null || surfaceProfile.Length < 2)
-        {
-            DestroyShadowProxy();
-            return;
-        }
-
-        EnsureShadowProxy();
-
-        float minX = surfaceProfile[0].x;
-        float maxX = surfaceProfile[surfaceProfile.Length - 1].x;
-
-        float lowestY = surfaceProfile[0].y;
-        for (int i = 1; i < surfaceProfile.Length; i++)
-            if (surfaceProfile[i].y < lowestY) lowestY = surfaceProfile[i].y;
-        
-        float bottomY = lowestY - 1f;
-
-        Vector2[] shape = new Vector2[surfaceProfile.Length + 2];
-        shape[0] = new Vector2(minX, bottomY);
-        for (int i = 0; i < surfaceProfile.Length; i++)
-            shape[i+1] = surfaceProfile[i];
-        shape[surfaceProfile.Length + 1] = new Vector2(maxX, bottomY);
-
-        shadowCollider.pathCount = 1;
-        shadowCollider.SetPath(0, shape);
-    }
-
-    private void EnsureShadowProxy()
-    {
-        if (shadowProxy != null) return;
-        Transform existing = transform.Find("SurfaceShadowProxy");
-        if (existing != null) shadowProxy = existing.gameObject;
-        else
-        {
-            shadowProxy = new GameObject("SurfaceShadowProxy");
-            shadowProxy.transform.SetParent(transform, false);
-            shadowProxy.transform.localPosition = Vector3.zero;
-            shadowProxy.layer = gameObject.layer;
-        }
-
-        shadowCollider = shadowProxy.GetComponent<PolygonCollider2D>();
-        if (!shadowCollider) shadowCollider = shadowProxy.AddComponent<PolygonCollider2D>();
-        shadowCollider.isTrigger = true;
-
-        shadowCaster = shadowProxy.GetComponent<ShadowCaster2D>();
-        if (!shadowCaster) shadowCaster = shadowProxy.AddComponent<ShadowCaster2D>();
-    }
-
-    private void DestroyShadowProxy()
-    {
-        if (shadowProxy)
-        {
-            if (Application.isPlaying) Destroy(shadowProxy);
-            else DestroyImmediate(shadowProxy);
-        }
+        Vector2 dir = sunTransform != null ? (Vector2)transform.InverseTransformDirection(sunTransform.right) : sunDirection;
+        if (dir.sqrMagnitude < 0.0001f) dir = new Vector2(0.5f, -1f);
+        return dir.normalized;
     }
 
     private void OnDrawGizmosSelected()
@@ -269,7 +246,4 @@ public class DestructibleTerrain : MonoBehaviour
             }
         }
     }
-
-    #endregion
 }
-

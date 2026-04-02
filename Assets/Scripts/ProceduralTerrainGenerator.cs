@@ -193,11 +193,11 @@ public class ProceduralTerrainGenerator : MonoBehaviour
             Debug.Log($"[ProceduralTerrain] Filtered to {solution.Count} paths (removed tiny islands)");
         }
 
-        // 9. Force Visuals to Update on Manager (Manager handles chunks and shadow)
+        // 9. Force Visuals to Update on Manager (Manager handles chunks)
         DestructibleTerrain dt = GetComponent<DestructibleTerrain>();
         if (dt != null)
         {
-            dt.SetGeneratorResults(surfacePoints, height, solution);
+            dt.SetGeneratorResults(solution);
         }
     }
 }

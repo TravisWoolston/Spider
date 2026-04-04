@@ -1,6 +1,7 @@
 using UnityEngine;
 using UnityEngine.Rendering.Universal;
 using Clipper2Lib;
+using System.Reflection;
 
 /// <summary>
 /// A localized piece of terrain. Handles its own Clipper ops, physics rebaking, 
@@ -16,6 +17,11 @@ public class DestructibleTerrainChunk : MonoBehaviour
     private Color terrainColor;
     private bool dirty = false;
     private Mesh cachedMesh;
+    
+    // Cache reflection lookups to save CPU
+    private static FieldInfo shapePathField;
+    private static FieldInfo pathCountField;
+    private static bool reflectionInitialized = false;
 
     // Depth-based vertex darkening settings
     private float fogFadeEnd = 5f;
@@ -77,7 +83,7 @@ public class DestructibleTerrainChunk : MonoBehaviour
         if (mat != null) 
             meshRenderer.sharedMaterial = mat;
         else if (meshRenderer.sharedMaterial == null)
-            meshRenderer.sharedMaterial = new Material(Shader.Find("Sprites/Default"));
+            meshRenderer.sharedMaterial = new Material(Shader.Find("Universal Render Pipeline/2D/Sprite-Lit-Default"));
 
         meshRenderer.sortingLayerName = layer;
         meshRenderer.sortingOrder = order;
@@ -131,28 +137,38 @@ public class DestructibleTerrainChunk : MonoBehaviour
         EnsureReady();
         if (myPaths == null || myPaths.Count == 0) return;
 
+        bool changed = false;
+
+        // Create the circular hole path
         PathD clipPath = new PathD(circleSegments);
-        for (int i = circleSegments; i >= 0; i--)
+        for (int i = 0; i < circleSegments; i++)
         {
             float angle = (i * Mathf.PI * 2f) / circleSegments;
             clipPath.Add(new PointD(
-                Mathf.Cos(angle) * radius + localPos.x,
-                Mathf.Sin(angle) * radius + localPos.y
+                Mathf.Cos(angle) * (double)radius + (double)localPos.x,
+                Mathf.Sin(angle) * (double)radius + (double)localPos.y
             ));
         }
 
-        int pathsBefore = myPaths.Count;
+        // Subtract the hole from the terrain using Clipper's Difference
         PathsD result = Clipper.Difference(myPaths, new PathsD { clipPath }, FillRule.NonZero, 2);
 
-        if (result == null || result.Count == 0)
+        if (result != null && result.Count > 0 && result.Count <= myPaths.Count + 10) // Basic sanity check
         {
-            Debug.LogWarning($"[Chunk {name}] Clipper.Difference returned {result?.Count ?? 0} paths (had {pathsBefore}). Clip at {localPos}, r={radius}");
-            // Don't wipe myPaths — keep existing geometry
-            return;
+            myPaths = Clipper.SimplifyPaths(result, 0.05, false); 
+            changed = true;
         }
 
-        myPaths = result;
-        SyncCollider();
+        if (!changed) return;
+
+        // Propagate digging to any wall chunks (children)
+        foreach (Transform child in transform)
+        {
+            var childChunk = child.GetComponent<DestructibleTerrainChunk>();
+            if (childChunk != null)
+                childChunk.MineHole(localPos, radius, circleSegments);
+        }
+
         dirty = true;
     }
 
@@ -160,8 +176,44 @@ public class DestructibleTerrainChunk : MonoBehaviour
     {
         if (dirty)
         {
+            SyncCollider();
+            SyncShadowCaster();
             UpdateMesh();
             dirty = false;
+        }
+    }
+
+    private void SyncShadowCaster()
+    {
+        var sc = GetComponent<ShadowCaster2D>();
+        if (sc == null || myPaths == null) return;
+
+        if (!reflectionInitialized)
+        {
+            var type = typeof(ShadowCaster2D);
+            shapePathField = type.GetField("m_ShapePath", BindingFlags.NonPublic | BindingFlags.Instance);
+            pathCountField = type.GetField("m_PathCount", BindingFlags.NonPublic | BindingFlags.Instance);
+            reflectionInitialized = true;
+        }
+
+        if (shapePathField != null)
+        {
+            try {
+                int totalPoints = 0;
+                foreach (var p in myPaths) totalPoints += p.Count;
+                
+                Vector3[] pts = new Vector3[totalPoints];
+                int idx = 0;
+                foreach (var p in myPaths)
+                {
+                    foreach (var pt in p)
+                    {
+                        pts[idx++] = new Vector3((float)pt.x, (float)pt.y, 0f);
+                    }
+                }
+                shapePathField.SetValue(sc, pts);
+                if (pathCountField != null) pathCountField.SetValue(sc, myPaths.Count);
+            } catch { /* Suppress */ }
         }
     }
 

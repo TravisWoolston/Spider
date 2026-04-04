@@ -75,7 +75,7 @@ public class SpiderWebShooter : MonoBehaviour
         isHoldingWeb = true;
         currentSegmentCount = 0;
         lastSegment = null; // Clean slate
-        Vector2 mousePos = Camera.main.ScreenToWorldPoint(Input.mousePosition);
+        Vector2 mousePos = GetMouseWorldPos();
         Vector2 startPos = (Vector2)webStartPoint.position;
         Vector2 direction = (mousePos - startPos).normalized;
 
@@ -323,5 +323,22 @@ public class SpiderWebShooter : MonoBehaviour
     }
 
     public Vector2 GetLastSegmentPos() => lastSegment != null ? (Vector2)lastSegment.transform.position : (Vector2)webStartPoint.position;
+
+    private Vector2 GetMouseWorldPos()
+    {
+        if (Camera.main.orthographic)
+            return Camera.main.ScreenToWorldPoint(Input.mousePosition);
+
+        // Perspective Camera Fix: Use a ray through the mouse and 
+        // find its intersection with the Z=0 plane (terrain level)
+        Ray ray = Camera.main.ScreenPointToRay(Input.mousePosition);
+        Plane worldPlane = new Plane(Vector3.forward, Vector3.zero); // Face the camera at Z=0
+
+        if (worldPlane.Raycast(ray, out float entry))
+        {
+            return ray.GetPoint(entry);
+        }
+        return Camera.main.ScreenToWorldPoint(new Vector3(Input.mousePosition.x, Input.mousePosition.y, 10f));
+    }
 }
 

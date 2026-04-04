@@ -1,6 +1,8 @@
 using UnityEngine;
+using UnityEngine.Rendering.Universal;
 using Clipper2Lib;
 using System.Collections.Generic;
+using System.Reflection;
 
 /// <summary>
 /// Chunk Manager for destructible terrain.
@@ -17,7 +19,35 @@ public class DestructibleTerrain : MonoBehaviour
     public Color terrainColor = new Color(0.35f, 0.22f, 0.13f, 1f);
     public Material customMaterial;
 
+    [Header("Background Wall Settings")]
+    [Tooltip("Generates a solid back wall behind the caves to catch shadows")]
+    public bool generateBackgroundWall = true;
+    public Color wallColor = new Color(0.2f, 0.15f, 0.1f, 1f);
+    [Tooltip("How far back to place the wall (Z axis)")]
+    public float wallZOffset = 1.0f;
+    public string wallSortingLayerName = "Default";
+    public int wallSortingOrder = -1;
+
+    public enum ShadowOption { None = 0, CastOnly = 1, CastAndSelfShadow = 2 }
+
+    [Header("Shadow Caster Automation")]
+    [Tooltip("How much the shadow shape shrinks or grows (1.0 = original shape)")]
+    public float shadowTrimEdge = 1.38f;
+    [Tooltip("Which layers this wall should cast shadows onto")]
+    public string[] shadowTargetLayers = new string[] { "Default", "Terrain_Background" };
+    [Tooltip("The casting mode for the background walls")]
+    public ShadowOption shadowCastingOption = ShadowOption.CastAndSelfShadow;
+
+    public enum MaskOption { None = 0, VisibleInsideMask = 1, VisibleOutsideMask = 2 }
+
     [Header("Layer Sorting")]
+    public string foregroundPhysicsLayer = "Default";
+    public uint foregroundRenderingLayerMask = 1;
+    [Space]
+    public string wallPhysicsLayer = "Default";
+    public uint wallRenderingLayerMask = 1;
+    public MaskOption wallMaskInteraction = MaskOption.None;
+    [Space]
     public string sortingLayerName = "Default";
     public int sortingOrder = 0;
 
@@ -127,7 +157,7 @@ public class DestructibleTerrain : MonoBehaviour
                 chunkRectPath.Add(new PointD((x + 1) * chunkSize + bleed, (y + 1) * chunkSize + bleed));
                 chunkRectPath.Add(new PointD(x * chunkSize - bleed, (y + 1) * chunkSize + bleed));
 
-                // Use Intersect (standard boolean op) which is more reliable for complex holes than RectClip
+                // Foreground: The terrain with caves
                 PathsD chunkPaths = Clipper.Intersect(paths, new PathsD { chunkRectPath }, FillRule.NonZero, 2);
                 
                 if (chunkPaths.Count > 0)
@@ -142,7 +172,99 @@ public class DestructibleTerrain : MonoBehaviour
                         chunk.SetSunOrigin(sunOrigin);
                         chunk.SetSunProjectionRange(minProj, maxProj);
                     }
-                    chunk.Initialize(chunkPaths, terrainColor, customMaterial, sortingLayerName, sortingOrder);
+                    
+                    if (chunk != null)
+                    {
+                        chunk.Initialize(chunkPaths, terrainColor, customMaterial, sortingLayerName, sortingOrder);
+                        
+                        // Apply Foreground Rendering Layer
+                        var chunkRenderer = chunk.GetComponent<MeshRenderer>();
+                        if (chunkRenderer != null) chunkRenderer.renderingLayerMask = foregroundRenderingLayerMask;
+
+                        // Optional: Background 'Back Wall'
+                        if (generateBackgroundWall)
+                        {
+                            string wallName = $"Wall_{x}_{y}";
+                            Transform wallTrans = chunk.transform.Find(wallName);
+                            if (!wallTrans)
+                            {
+                                GameObject wallGO = new GameObject(wallName);
+                                wallGO.transform.SetParent(chunk.transform, false);
+                                wallGO.layer = LayerMask.NameToLayer(wallPhysicsLayer);
+                                wallTrans = wallGO.transform;
+                            }
+                            wallTrans.localPosition = new Vector3(0, 0, wallZOffset);
+
+                            var wallChunk = wallTrans.GetComponent<DestructibleTerrainChunk>();
+                            if (!wallChunk) wallChunk = wallTrans.gameObject.AddComponent<DestructibleTerrainChunk>();
+                            
+                            // Walls should have the shadow caster enabled as requested.
+                            wallChunk.Initialize(chunkPaths, wallColor, customMaterial, wallSortingLayerName, wallSortingOrder);
+                            
+                            // Apply Rendering Layer and Mask Interaction
+                            var wallRenderer = wallChunk.GetComponent<MeshRenderer>();
+                            if (wallRenderer != null)
+                            {
+                                try {
+                                    wallRenderer.renderingLayerMask = wallRenderingLayerMask;
+                                    // MeshRenderers don't have MaskInteraction by default, but some URP versions map it.
+                                    var maskProp = wallRenderer.GetType().GetProperty("maskInteraction", BindingFlags.Public | BindingFlags.Instance);
+                                    if (maskProp != null) maskProp.SetValue(wallRenderer, (int)wallMaskInteraction);
+                                } catch { /* Suppress if not supported on this version */ }
+                            }
+
+                            // Ensure shadow casting is enabled on the wall.
+                            var wallShadow = wallChunk.GetComponent<ShadowCaster2D>();
+                            if (wallShadow) 
+                            {
+                                wallShadow.enabled = true;
+                                
+                                // Automate Shadow Settings using Reflection
+                                var type = typeof(ShadowCaster2D);
+                                var allFields = type.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+
+                                FieldInfo trimField = null;
+                                FieldInfo layerField = null;
+                                FieldInfo castOptionField = null;
+                                FieldInfo silhouetteField = null;
+
+                                foreach (var f in allFields)
+                                {
+                                    string n = f.Name.ToLower();
+                                    if (n.Contains("trim") || (n.Contains("edge") && n.Contains("offset"))) trimField = f;
+                                    if (n.Contains("sorting") && n.Contains("layer")) layerField = f;
+                                    if (n.Contains("casting") && n.Contains("option")) castOptionField = f;
+                                    if (n.Contains("renderer") && n.Contains("silhouette")) silhouetteField = f;
+                                }
+
+                                if (trimField != null) trimField.SetValue(wallShadow, shadowTrimEdge);
+                                if (silhouetteField != null) silhouetteField.SetValue(wallShadow, false);
+                                
+                                if (layerField != null && shadowTargetLayers != null)
+                                {
+                                    int[] layerIDs = new int[shadowTargetLayers.Length];
+                                    for (int i = 0; i < shadowTargetLayers.Length; i++)
+                                        layerIDs[i] = SortingLayer.NameToID(shadowTargetLayers[i]);
+                                    layerField.SetValue(wallShadow, layerIDs);
+                                }
+
+                                if (castOptionField != null)
+                                {
+                                    try {
+                                        object val = System.Enum.Parse(castOptionField.FieldType, shadowCastingOption.ToString());
+                                        castOptionField.SetValue(wallShadow, val);
+                                    } catch { 
+                                        castOptionField.SetValue(wallShadow, (int)shadowCastingOption);
+                                    }
+                                }
+                            }
+                        }
+
+                        // DISABLE shadow casting on the colored foreground.
+                        var mainShadow = chunk.GetComponent<ShadowCaster2D>();
+                        if (mainShadow) mainShadow.enabled = false;
+                    }
+
                     chunkCount++;
                 }
             }
@@ -162,10 +284,8 @@ public class DestructibleTerrain : MonoBehaviour
 
         GameObject go = new GameObject($"Chunk_{x}_{y}");
         go.transform.SetParent(transform, false);
-        go.transform.localPosition = Vector3.zero;
-        go.transform.localRotation = Quaternion.identity;
-        go.layer = gameObject.layer;
-
+        go.layer = LayerMask.NameToLayer(foregroundPhysicsLayer);
+        
         chunk = go.AddComponent<DestructibleTerrainChunk>();
         chunks[key] = chunk;
         return chunk;

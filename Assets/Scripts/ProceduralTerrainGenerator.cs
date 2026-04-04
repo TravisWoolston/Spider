@@ -20,27 +20,45 @@ public class ProceduralTerrainGenerator : MonoBehaviour
 
     [Header("Cave Generation")]
     public bool generateCaves = true;
-    public float caveFrequency = 0.15f;
+    [Tooltip("Small scale frequency for wall detail")]
+    public float caveFrequency = 0.08f;
+    [Tooltip("Large scale frequency for overall cavern shapes")]
+    public float cavernFrequency = 0.03f;
     [Range(0f, 1f)]
-    public float caveThreshold = 0.55f;
-    public float caveHoleRadius = 0.6f;
-    [Tooltip("Separate resolution for cave sampling. Higher = fewer samples = faster.")]
-    public float caveResolution = 1.5f;
-    [Tooltip("Segments per cave hole. Lower = faster but blockier caves.")]
+    public float caveThreshold = 0.5f;
+    public float caveHoleRadius = 1.2f;
+    [Tooltip("Denser sampling creates smoother, merged caverns. Keep between 0.5 and 1.5.")]
+    public float caveResolution = 0.8f;
+
+    [Header("Cave Depth Scaling")]
+    [Tooltip("World Y depth where caves start to get larger/more frequent")]
+    public float depthStart = 0f;
+    [Tooltip("World Y depth where caves reach maximum size/frequency")]
+    public float depthEnd = -40f;
+    [Tooltip("How much to lower the threshold (more caves) at max depth")]
+    [Range(0f, 1f)]
+    public float deeperCaveThresholdBoost = 0.2f;
+    [Tooltip("How much to increase the radius (larger caves) at max depth")]
+    public float deeperCaveRadiusBoost = 2.0f;
+    [Tooltip("Controls how sparse cave systems are. Higher = larger solid gaps between systems.")]
+    [Range(0f, 1f)]
+    public float cavernSystemThreshold = 0.5f;
+
+    [Header("Cave Details")]
+    [Tooltip("Segments per cave hole. 8-12 is good for organic shapes.")]
     [Range(4, 16)]
-    public int caveSegments = 6;
-    [Tooltip("How much randomness to add to cave hole shapes (0 = perfect circles, 1 = very jagged)")]
+    public int caveSegments = 10;
+    [Tooltip("How much randomness to add to cave hole shapes")]
     [Range(0f, 1f)]
-    public float caveIrregularity = 0.4f;
-    [Tooltip("Secondary noise frequency for cave shape distortion")]
+    public float caveIrregularity = 0.5f;
     public float caveShapeFrequency = 0.5f;
 
     [Header("Randomization")]
     public float seed = 0f;
 
     [Header("Performance")]
-    [Tooltip("Maximum number of cave holes to generate")]
-    public int maxCaveHoles = 500;
+    [Tooltip("Maximum number of cave holes to generate (increase for large maps)")]
+    public int maxCaveHoles = 5000;
     [Tooltip("Simplify paths after boolean operations to reduce vertex count")]
     public float simplifyTolerance = 0.05f;
     [Tooltip("Maximum paths in the final collider. Excess islands will be culled.")]
@@ -85,29 +103,53 @@ public class ProceduralTerrainGenerator : MonoBehaviour
         }
 
 
-        // 3. Cut Caves - ORGANIC SHAPES
+        // 3. Cut Caves - CAVERN LAYERED NOISE
         if (generateCaves)
         {
-            float caveSampleRes = Mathf.Max(caveResolution, resolution);
+            float caveSampleRes = Mathf.Max(caveResolution, 0.1f);
             int cols = Mathf.CeilToInt(width / caveSampleRes);
             int rows = Mathf.CeilToInt(height / caveSampleRes);
 
             int holeCount = 0;
             float shapeSeedOffset = seed + 1000f;
 
-            for (int x = 0; x < cols && holeCount < maxCaveHoles; x++)
+            for (int x = 0; x < cols; x++)
             {
+                if (holeCount >= maxCaveHoles)
+                {
+                    Debug.LogWarning($"[ProceduralTerrain] Max cave holes ({maxCaveHoles}) reached! Remaining terrain will be solid. Increase 'Max Cave Holes' in the inspector for larger maps.");
+                    break;
+                }
+
                 float worldX = x * caveSampleRes;
 
-                for (int y = 0; y < rows && holeCount < maxCaveHoles; y++)
+                for (int y = 0; y < rows; y++)
                 {
+                    if (holeCount >= maxCaveHoles) break;
+
                     float worldY = -y * caveSampleRes;
 
+                    // 3a. Depth-Based Scaling
+                    // Tunnels become larger and more frequent the deeper they go.
+                    float depthFactor = Mathf.InverseLerp(depthStart, depthEnd, worldY);
+                    float currentThreshold = caveThreshold - (deeperCaveThresholdBoost * depthFactor);
+                    float currentRadius = caveHoleRadius + (deeperCaveRadiusBoost * depthFactor);
+
+                    // Layer 1: Base Cavern Pockets (Small Detail)
                     float noise = Mathf.PerlinNoise(
                         worldX * caveFrequency + seed,
                         worldY * caveFrequency + seed);
 
-                    if (noise > caveThreshold)
+                    // Layer 2: Massive Open Areas (Large Scale 'System Mask')
+                    float macroCavern = Mathf.PerlinNoise(
+                        worldX * cavernFrequency + seed + 500f,
+                        worldY * cavernFrequency + seed + 500f);
+
+                    // SYSTEM MASK: Only allow caves where macro-noise is high.
+                    // This creates 'islands' of caves rather than an even field.
+                    if (macroCavern < cavernSystemThreshold) continue;
+
+                    if (noise > currentThreshold)
                     {
                         PathD hole = new PathD(caveSegments);
 
@@ -121,10 +163,11 @@ public class ProceduralTerrainGenerator : MonoBehaviour
                             );
 
                             float radiusVariation = Mathf.Lerp(1f, 0.6f + angleNoise * 0.8f, caveIrregularity);
-                            float variedRadius = caveHoleRadius * radiusVariation;
+                            float variedRadius = currentRadius * radiusVariation;
 
-                            float sizeVariation = (noise - caveThreshold) / (1f - caveThreshold);
-                            variedRadius *= Mathf.Lerp(0.7f, 1.3f, sizeVariation);
+                            // Scale hole size based on noise intensity relative to threshold
+                            float sizeVariation = (noise - currentThreshold) / (1f - currentThreshold);
+                            variedRadius *= Mathf.Lerp(0.8f, 1.5f, Mathf.Max(0f, sizeVariation));
 
                             hole.Add(new PointD(
                                 worldX + Mathf.Cos(angle) * variedRadius,
@@ -199,5 +242,21 @@ public class ProceduralTerrainGenerator : MonoBehaviour
         {
             dt.SetGeneratorResults(solution);
         }
+    }
+
+    private void OnDrawGizmosSelected()
+    {
+        // Draw Depth Indicators
+        Vector3 pos = transform.position;
+        
+        Gizmos.color = new Color(0, 1, 1, 0.5f); // Cyan for Start
+        Gizmos.DrawLine(pos + new Vector3(0, depthStart, 0), pos + new Vector3(width, depthStart, 0));
+        
+        Gizmos.color = new Color(1, 0.5f, 0, 0.5f); // Orange for End
+        Gizmos.DrawLine(pos + new Vector3(0, depthEnd, 0), pos + new Vector3(width, depthEnd, 0));
+
+        // Draw boundaries
+        Gizmos.color = Color.white;
+        Gizmos.DrawWireCube(pos + new Vector3(width * 0.5f, -height * 0.5f, 0), new Vector3(width, height, 0.1f));
     }
 }

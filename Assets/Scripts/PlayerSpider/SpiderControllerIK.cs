@@ -722,7 +722,7 @@ public class SpiderControllerIK : MonoBehaviour
         digCooldownTimer -= Time.deltaTime;
         if (digCooldownTimer > 0f) return;
 
-        Vector2 mousePos = Camera.main.ScreenToWorldPoint(Input.mousePosition);
+        Vector2 mousePos = GetMouseWorldPos();
         Vector2 headPos = headRb != null ? headRb.position : (Vector2)headT.position;
 
         // Don't dig if the mouse is too far from the spider
@@ -794,6 +794,23 @@ public class SpiderControllerIK : MonoBehaviour
             chosenLeg.DigStrike(surfacePoint, surfaceNormal, surfaceHit.collider, digWindUpDist, digStrikeSpeed, digRadius, digWindUpTime, digRecoveryTime);
             digCooldownTimer = digStrikeInterval;
         }
+    }
+
+    private Vector2 GetMouseWorldPos()
+    {
+        if (Camera.main.orthographic)
+            return Camera.main.ScreenToWorldPoint(Input.mousePosition);
+
+        // Perspective Camera Fix: Use a ray through the mouse and 
+        // find its intersection with the Z=0 plane (terrain level)
+        Ray ray = Camera.main.ScreenPointToRay(Input.mousePosition);
+        Plane worldPlane = new Plane(Vector3.forward, Vector3.zero); // Face the camera at Z=0
+
+        if (worldPlane.Raycast(ray, out float entry))
+        {
+            return ray.GetPoint(entry);
+        }
+        return Camera.main.ScreenToWorldPoint(new Vector3(Input.mousePosition.x, Input.mousePosition.y, 10f));
     }
 
     // ───────────────────────────────────────────────────────────
@@ -990,7 +1007,7 @@ public class SpiderControllerIK : MonoBehaviour
     {
         if (shooter == null || !shooter.enabled) return;
 
-        Vector2 mousePos = Camera.main.ScreenToWorldPoint(Input.mousePosition);
+        Vector2 mousePos = GetMouseWorldPos();
         float distToHead = Vector2.Distance(mousePos, headT.position);
 
         if (!isManipulating && distToHead < legExtensionMax && shooter.IsHoldingWeb)

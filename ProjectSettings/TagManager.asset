@@ -14,15 +14,15 @@ TagManager:
   - UI
   - Static Environment
   - Web
-  - Legs1
-  - Legs2
-  - Legs3
-  - Legs4
-  - Legs5
-  - Legs6
-  - Legs7
-  - Legs8
-  - Legs9
+  - 
+  - 
+  - 
+  - 
+  - 
+  - 
+  - 
+  - 
+  - 
   - Terrain_Background
   - Dirt
   - Terrain_Foreground
@@ -42,14 +42,14 @@ TagManager:
   - name: Default
     uniqueID: 0
     locked: 0
+  - name: Terrain_Background
+    uniqueID: 2052116867
+    locked: 0
   - name: Surface
     uniqueID: 2564226439
     locked: 0
   - name: Actors
     uniqueID: 4229751207
-    locked: 0
-  - name: Terrain_Background
-    uniqueID: 2052116867
     locked: 0
   - name: Terrain_Foreground
     uniqueID: 1802299551

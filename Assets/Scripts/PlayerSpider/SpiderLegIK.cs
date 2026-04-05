@@ -545,30 +545,40 @@ public class SpiderLegIK : MonoBehaviour
         yield return new WaitForSeconds(0.05f);
 
         // ── Phase 5: Recovery ──
-        // Always animate at the normal foot movement speed — never teleport
+        // Always animate at the normal foot movement speed — never teleport.
+        // After mining, the terrain shape has changed — always raycast to find
+        // the actual surface so we replant with a valid normal and position.
         Vector2 recoveryTarget;
+        Vector2 searchOrigin = impactPoint + surfaceNormal * (windUpDist * 0.5f);
+        RaycastHit2D recoveryHit = Physics2D.Raycast(searchOrigin, -surfaceNormal, windUpDist + 1f, controller.attachableLayers);
 
-        if (controller.isDigging)
+        if (recoveryHit.collider != null)
         {
-            // Still digging — lift just above the impact site, ready for the next strike
-            recoveryTarget = impactPoint + surfaceNormal * 0.5f;
-        }
-        else
-        {
-            // Digging stopped — find a new surface attachment nearby
-            // (terrain may have been mined away from the original position)
-            Vector2 searchOrigin = impactPoint + surfaceNormal * (windUpDist * 0.5f);
-            RaycastHit2D recoveryHit = Physics2D.Raycast(searchOrigin, -surfaceNormal, windUpDist, controller.attachableLayers);
-
-            if (recoveryHit.collider != null)
+            int webLayer = LayerMask.NameToLayer("Web");
+            if (recoveryHit.collider.gameObject.layer != webLayer)
             {
-                recoveryTarget = recoveryHit.point;
                 plantedNormal = recoveryHit.normal;
+                if (controller.isDigging)
+                {
+                    // Still digging — hover just above the found surface, ready for next strike
+                    recoveryTarget = recoveryHit.point + recoveryHit.normal * 0.5f;
+                }
+                else
+                {
+                    // Done digging — replant on the surface
+                    recoveryTarget = recoveryHit.point;
+                }
             }
             else
             {
-                recoveryTarget = startPos;
+                // Only found web — fall back to hovering above impact
+                recoveryTarget = impactPoint + surfaceNormal * 0.5f;
             }
+        }
+        else
+        {
+            // Terrain was completely mined away — return to start position
+            recoveryTarget = startPos;
         }
 
         // Animate to the recovery target at step speed

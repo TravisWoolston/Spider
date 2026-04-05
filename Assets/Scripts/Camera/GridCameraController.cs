@@ -23,6 +23,32 @@ public class GridCameraController : MonoBehaviour
     public float minZoom = 2f;
     public float maxZoom = 40f;
 
+    private float GetCurrentZoom()
+    {
+        return cam.orthographic ? cam.orthographicSize : cam.fieldOfView;
+    }
+
+    private void SetCurrentZoom(float value)
+    {
+        if (cam.orthographic)
+            cam.orthographicSize = Mathf.Clamp(value, minZoom, maxZoom);
+        else
+            cam.fieldOfView = Mathf.Clamp(value, minZoom, maxZoom);
+    }
+
+    private float GetCameraHalfHeightAtTarget()
+    {
+        if (cam.orthographic)
+            return cam.orthographicSize;
+
+        if (targetRb == null)
+            return 1f;
+
+        float depth = Vector3.Dot(targetRb.transform.position - cam.transform.position, cam.transform.forward);
+        depth = Mathf.Max(0.01f, depth);
+        return Mathf.Tan(cam.fieldOfView * 0.5f * Mathf.Deg2Rad) * depth;
+    }
+
     void Start()
     {
         cam = GetComponentInChildren<Camera>();
@@ -40,25 +66,28 @@ public class GridCameraController : MonoBehaviour
 
     void LateUpdate()
     {
+        if (cam == null) return;
+
         // Zoom Control
         float scroll = Input.GetAxis("Mouse ScrollWheel");
+        float zoom = GetCurrentZoom();
         if (scroll != 0)
         {
-            cam.orthographicSize -= scroll * scrollSensitivity;
+            zoom -= scroll * scrollSensitivity;
         }
 
         if (Input.GetKey(KeyCode.Keypad1))
         {
-            cam.orthographicSize -= camZoom;
+            zoom -= camZoom;
         }
         if (Input.GetKey(KeyCode.Keypad2))
         {
-            cam.orthographicSize += camZoom;
+            zoom += camZoom;
         }
 
-        cam.orthographicSize = Mathf.Clamp(cam.orthographicSize, minZoom, maxZoom);
+        SetCurrentZoom(zoom);
 
-        if (targetRb == null || cam == null) return;
+        if (targetRb == null) return;
 
         if (followTarget)
         {
@@ -95,7 +124,8 @@ public class GridCameraController : MonoBehaviour
 
             if ((viewportPoint.x < 0 + transitionMod || viewportPoint.x > 1 - transitionMod) && !disableTransition)
             {
-                float moveAmountX = cam.orthographicSize * cam.aspect * (camMoveMod - transitionMod);
+                float camHalfHeight = GetCameraHalfHeightAtTarget();
+                float moveAmountX = camHalfHeight * cam.aspect * (camMoveMod - transitionMod);
                 if (viewportPoint.x < 0 + transitionMod)
                 {
                     targetPosition -= new Vector3(moveAmountX, 0, 0);
@@ -109,7 +139,7 @@ public class GridCameraController : MonoBehaviour
 
             if (viewportPoint.y < 0 || viewportPoint.y > 1)
             {
-                float moveAmountY = cam.orthographicSize * camMoveMod;
+                float moveAmountY = GetCameraHalfHeightAtTarget() * camMoveMod;
                 if (viewportPoint.y < 0)
                 {
                     targetPosition -= new Vector3(0, moveAmountY, 0);

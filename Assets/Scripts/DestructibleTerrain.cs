@@ -31,14 +31,14 @@ public class DestructibleTerrain : MonoBehaviour
     public enum ShadowOption { None = 0, CastOnly = 1, CastAndSelfShadow = 2 }
 
     [Header("Shadow Caster Automation")]
-    [Tooltip("How much the shadow shape shrinks or grows (1.0 = original shape)")]
-    public float shadowTrimEdge = 1.38f;
+    [Tooltip("Inset distance for the shadow shape. Positive values shrink the shadow inward from terrain edges, creating a light-bleed zone at cave openings.")]
+    public float shadowInset = 1.38f;
+    [Tooltip("Minimum polygon area to keep after digging. Smaller fragments are removed.")]
+    public float minFragmentArea = 0.5f;
     [Tooltip("Which layers this wall should cast shadows onto")]
     public string[] shadowTargetLayers = new string[] { "Default", "Terrain_Background" };
     [Tooltip("The casting mode for the background walls")]
     public ShadowOption shadowCastingOption = ShadowOption.CastAndSelfShadow;
-
-    public enum MaskOption { None = 0, VisibleInsideMask = 1, VisibleOutsideMask = 2 }
 
     [Header("Layer Sorting")]
     public string foregroundPhysicsLayer = "Default";
@@ -46,31 +46,9 @@ public class DestructibleTerrain : MonoBehaviour
     [Space]
     public string wallPhysicsLayer = "Default";
     public uint wallRenderingLayerMask = 1;
-    public MaskOption wallMaskInteraction = MaskOption.None;
     [Space]
     public string sortingLayerName = "Default";
     public int sortingOrder = 0;
-
-    [Header("Sun")]
-    [Tooltip("Direction the sun/light comes from in world space. If empty, the current transform is used.")]
-    public Transform sunTransform;
-    [Tooltip("Fallback sun direction in world space when no sunTransform is assigned.")]
-    public Vector2 sunDirection = new Vector2(0.5f, -1f);
-
-    [Header("Fog Effects")]
-    public bool enableFogEffects = true;
-
-    [Header("Underground Fog")]
-    [Tooltip("Maximum distance from an edge before terrain is fully dark")]
-    public float fogFadeDistance = 5f;
-    [Tooltip("Darkness intensity (0 = invisible, 1 = fully opaque black)")]
-    [Range(0f, 1f)]
-    public float fogOpacity = 0.95f;
-
-    [Header("Fog Curve")]
-    [Tooltip("Higher values make the terrain darken sooner. 1 = linear, 2+ = much more aggressive.")]
-    [Range(0.2f, 4f)]
-    public float fogAggressiveness = 2f;
 
     private Dictionary<Vector2Int, DestructibleTerrainChunk> chunks = new Dictionary<Vector2Int, DestructibleTerrainChunk>();
 
@@ -115,26 +93,7 @@ public class DestructibleTerrain : MonoBehaviour
     {
         ClearChunks();
 
-        Vector2 sunDir = GetSunDirection();
-        Vector2 sunOrigin = transform.InverseTransformPoint(sunTransform != null ? sunTransform.position : transform.position);
-
         RectD bounds = Clipper.GetBounds(paths);
-        Vector2[] corners = new Vector2[]
-        {
-            new Vector2((float)bounds.left, (float)bounds.top),
-            new Vector2((float)bounds.right, (float)bounds.top),
-            new Vector2((float)bounds.right, (float)bounds.bottom),
-            new Vector2((float)bounds.left, (float)bounds.bottom)
-        };
-        float minProj = float.MaxValue;
-        float maxProj = float.MinValue;
-        foreach (var c in corners)
-        {
-            float p = Vector2.Dot(c, -sunDir);
-            if (p < minProj) minProj = p;
-            if (p > maxProj) maxProj = p;
-        }
-        if (Mathf.Approximately(minProj, maxProj)) maxProj = minProj + 0.001f;
 
         // Find total bounds to determine grid size
         int minX = Mathf.FloorToInt((float)bounds.left / chunkSize);
@@ -145,12 +104,23 @@ public class DestructibleTerrain : MonoBehaviour
         Debug.Log($"[DestructibleTerrain] Splitting {paths.Count} paths into chunks. Bounds: {bounds.left},{bounds.bottom} to {bounds.right},{bounds.top}");
         int chunkCount = 0;
 
+        // Compute the shadow inset on the FULL terrain before chunking so that
+        // chunk boundary edges are not shrunk inward (which would create gaps).
+        PathsD globalInsetPaths = paths;
+        if (shadowInset > 0f)
+        {
+            PathsD inset = Clipper.InflatePaths(paths, -shadowInset,
+                Clipper2Lib.JoinType.Round, Clipper2Lib.EndType.Polygon, 2, 2);
+            if (inset != null && inset.Count > 0)
+                globalInsetPaths = inset;
+        }
+
         for (int x = minX; x < maxX; x++)
         {
             for (int y = minY; y < maxY; y++)
             {
                 // Create a slightly expanded rectangle for intersecting to prevent seams
-                float bleed = 0.05f; 
+                float bleed = 0.05f;
                 PathD chunkRectPath = new PathD(4);
                 chunkRectPath.Add(new PointD(x * chunkSize - bleed, y * chunkSize - bleed));
                 chunkRectPath.Add(new PointD((x + 1) * chunkSize + bleed, y * chunkSize - bleed));
@@ -159,24 +129,16 @@ public class DestructibleTerrain : MonoBehaviour
 
                 // Foreground: The terrain with caves
                 PathsD chunkPaths = Clipper.Intersect(paths, new PathsD { chunkRectPath }, FillRule.NonZero, 2);
-                
+
                 if (chunkPaths.Count > 0)
                 {
                     DestructibleTerrainChunk chunk = GetOrCreateChunk(x, y);
-                    chunk.SetFogEnabled(enableFogEffects);
-                    if (enableFogEffects)
-                    {
-                        chunk.SetFogSettings(fogFadeDistance, fogOpacity);
-                        chunk.SetFogAggressiveness(fogAggressiveness);
-                        chunk.SetSunDirection(sunDir);
-                        chunk.SetSunOrigin(sunOrigin);
-                        chunk.SetSunProjectionRange(minProj, maxProj);
-                    }
-                    
+                    chunk.SetSkipFlags(noShadowCaster: true, noCollider: false);
+
                     if (chunk != null)
                     {
                         chunk.Initialize(chunkPaths, terrainColor, customMaterial, sortingLayerName, sortingOrder);
-                        
+
                         // Apply Foreground Rendering Layer
                         var chunkRenderer = chunk.GetComponent<MeshRenderer>();
                         if (chunkRenderer != null) chunkRenderer.renderingLayerMask = foregroundRenderingLayerMask;
@@ -197,72 +159,32 @@ public class DestructibleTerrain : MonoBehaviour
 
                             var wallChunk = wallTrans.GetComponent<DestructibleTerrainChunk>();
                             if (!wallChunk) wallChunk = wallTrans.gameObject.AddComponent<DestructibleTerrainChunk>();
-                            
-                            // Walls should have the shadow caster enabled as requested.
-                            wallChunk.Initialize(chunkPaths, wallColor, customMaterial, wallSortingLayerName, wallSortingOrder);
-                            
-                            // Apply Rendering Layer and Mask Interaction
+                            wallChunk.SetSkipFlags(noShadowCaster: false, noCollider: true);
+                            // shadowInset=0: wall receives pre-inset paths, no per-chunk re-inset.
+                            wallChunk.SetShadowInset(0f);
+
+                            // Pre-configure the shadow caster BEFORE Initialize so that
+                            // SyncShadowCaster (called inside Initialize) writes our inset
+                            // shape into an already-configured caster. This prevents URP's
+                            // Awake/Update from overwriting our shape with renderer bounds.
+                            var wallSC = wallTrans.GetComponent<ShadowCaster2D>();
+                            if (!wallSC) wallSC = wallTrans.gameObject.AddComponent<ShadowCaster2D>();
+                            wallSC.enabled = true;
+                            ConfigureShadowCaster(wallSC);
+
+                            // Clip the globally-inset paths to this chunk rect so wall
+                            // mesh + shadow use the seamless pre-inset shape.
+                            PathsD wallChunkPaths = Clipper.Intersect(globalInsetPaths, new PathsD { chunkRectPath }, FillRule.NonZero, 2);
+                            if (wallChunkPaths == null || wallChunkPaths.Count == 0)
+                                wallChunkPaths = chunkPaths;
+
+                            wallChunk.Initialize(wallChunkPaths, wallColor, customMaterial, wallSortingLayerName, wallSortingOrder);
+
+                            // Apply Rendering Layer
                             var wallRenderer = wallChunk.GetComponent<MeshRenderer>();
                             if (wallRenderer != null)
-                            {
-                                try {
-                                    wallRenderer.renderingLayerMask = wallRenderingLayerMask;
-                                    // MeshRenderers don't have MaskInteraction by default, but some URP versions map it.
-                                    var maskProp = wallRenderer.GetType().GetProperty("maskInteraction", BindingFlags.Public | BindingFlags.Instance);
-                                    if (maskProp != null) maskProp.SetValue(wallRenderer, (int)wallMaskInteraction);
-                                } catch { /* Suppress if not supported on this version */ }
-                            }
-
-                            // Ensure shadow casting is enabled on the wall.
-                            var wallShadow = wallChunk.GetComponent<ShadowCaster2D>();
-                            if (wallShadow) 
-                            {
-                                wallShadow.enabled = true;
-                                
-                                // Automate Shadow Settings using Reflection
-                                var type = typeof(ShadowCaster2D);
-                                var allFields = type.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-
-                                FieldInfo trimField = null;
-                                FieldInfo layerField = null;
-                                FieldInfo castOptionField = null;
-                                FieldInfo silhouetteField = null;
-
-                                foreach (var f in allFields)
-                                {
-                                    string n = f.Name.ToLower();
-                                    if (n.Contains("trim") || (n.Contains("edge") && n.Contains("offset"))) trimField = f;
-                                    if (n.Contains("sorting") && n.Contains("layer")) layerField = f;
-                                    if (n.Contains("casting") && n.Contains("option")) castOptionField = f;
-                                    if (n.Contains("renderer") && n.Contains("silhouette")) silhouetteField = f;
-                                }
-
-                                if (trimField != null) trimField.SetValue(wallShadow, shadowTrimEdge);
-                                if (silhouetteField != null) silhouetteField.SetValue(wallShadow, false);
-                                
-                                if (layerField != null && shadowTargetLayers != null)
-                                {
-                                    int[] layerIDs = new int[shadowTargetLayers.Length];
-                                    for (int i = 0; i < shadowTargetLayers.Length; i++)
-                                        layerIDs[i] = SortingLayer.NameToID(shadowTargetLayers[i]);
-                                    layerField.SetValue(wallShadow, layerIDs);
-                                }
-
-                                if (castOptionField != null)
-                                {
-                                    try {
-                                        object val = System.Enum.Parse(castOptionField.FieldType, shadowCastingOption.ToString());
-                                        castOptionField.SetValue(wallShadow, val);
-                                    } catch { 
-                                        castOptionField.SetValue(wallShadow, (int)shadowCastingOption);
-                                    }
-                                }
-                            }
+                                wallRenderer.renderingLayerMask = wallRenderingLayerMask;
                         }
-
-                        // DISABLE shadow casting on the colored foreground.
-                        var mainShadow = chunk.GetComponent<ShadowCaster2D>();
-                        if (mainShadow) mainShadow.enabled = false;
                     }
 
                     chunkCount++;
@@ -277,6 +199,73 @@ public class DestructibleTerrain : MonoBehaviour
         if (parentCol != null) parentCol.enabled = false;
     }
 
+    /// <summary>
+    /// Configure a ShadowCaster2D using exact URP field names via reflection.
+    /// Sets casting source to ShapeEditor, casting option, target sorting layers,
+    /// and disables renderer silhouette. Shadow inset is applied via Clipper in
+    /// DestructibleTerrainChunk.SyncShadowCaster rather than URP's trimEdge
+    /// (which is non-functional in ShapeEditor mode).
+    /// </summary>
+    private void ConfigureShadowCaster(ShadowCaster2D sc)
+    {
+        var type = typeof(ShadowCaster2D);
+        var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+
+        try
+        {
+            // Force ShapeEditor mode so URP uses m_ShapePath data
+            // ShadowCastingSources: None=0, ShapeEditor=1, ShapeProvider=2
+            var sourceField = type.GetField("m_ShadowCastingSource", flags);
+            if (sourceField != null)
+                sourceField.SetValue(sc, System.Enum.ToObject(sourceField.FieldType, 1)); // ShapeEditor = 1
+
+            // Disable renderer silhouette (use our polygon shape, not the sprite bounds)
+            var silhouetteField = type.GetField("m_UseRendererSilhouette", flags);
+            if (silhouetteField != null)
+                silhouetteField.SetValue(sc, false);
+
+            // Apply target sorting layers
+            var layerField = type.GetField("m_ApplyToSortingLayers", flags);
+            if (layerField != null && shadowTargetLayers != null)
+            {
+                int[] layerIDs = new int[shadowTargetLayers.Length];
+                for (int i = 0; i < shadowTargetLayers.Length; i++)
+                    layerIDs[i] = SortingLayer.NameToID(shadowTargetLayers[i]);
+                layerField.SetValue(sc, layerIDs);
+            }
+
+            // Apply casting option (SelfShadow=0, CastShadow=1, CastAndSelfShadow=2, NoShadow=3)
+            var castOptionField = type.GetField("m_CastingOption", flags);
+            if (castOptionField != null)
+            {
+                // Map our ShadowOption enum to URP's ShadowCastingOptions
+                int urpValue;
+                switch (shadowCastingOption)
+                {
+                    case ShadowOption.None: urpValue = 3; break; // NoShadow
+                    case ShadowOption.CastOnly: urpValue = 1; break; // CastShadow
+                    case ShadowOption.CastAndSelfShadow: urpValue = 2; break; // CastAndSelfShadow
+                    default: urpValue = 1; break;
+                }
+                castOptionField.SetValue(sc, System.Enum.ToObject(castOptionField.FieldType, urpValue));
+            }
+
+            // Note: URP's ShapeEditor mode hardcodes allowTrimming=false in
+            // SetShadowShape -> SetShapeWithLines, so trimEdge is impossible via
+            // reflection. Instead, shadow inset is applied via Clipper.InflatePaths
+            // in DestructibleTerrainChunk.SyncShadowCaster before writing m_ShapePath.
+
+            // Force URP to rebuild shadow mesh after our configuration changes.
+            var forceField = type.GetField("m_ForceShadowMeshRebuild", flags);
+            if (forceField != null)
+                forceField.SetValue(sc, true);
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogWarning($"[DestructibleTerrain] Shadow caster configuration failed: {e.Message}");
+        }
+    }
+
     private DestructibleTerrainChunk GetOrCreateChunk(int x, int y)
     {
         Vector2Int key = new Vector2Int(x, y);
@@ -285,7 +274,7 @@ public class DestructibleTerrain : MonoBehaviour
         GameObject go = new GameObject($"Chunk_{x}_{y}");
         go.transform.SetParent(transform, false);
         go.layer = LayerMask.NameToLayer(foregroundPhysicsLayer);
-        
+
         chunk = go.AddComponent<DestructibleTerrainChunk>();
         chunks[key] = chunk;
         return chunk;
@@ -318,44 +307,81 @@ public class DestructibleTerrain : MonoBehaviour
     public void MineHole(Vector2 worldPos, float radius, int circleSegments = 16)
     {
         Vector2 localPos = transform.InverseTransformPoint(worldPos);
-        
+
         // Find chunks in range
         int startX = Mathf.FloorToInt((localPos.x - radius) / chunkSize);
         int endX = Mathf.FloorToInt((localPos.x + radius) / chunkSize);
         int startY = Mathf.FloorToInt((localPos.y - radius) / chunkSize);
         int endY = Mathf.FloorToInt((localPos.y + radius) / chunkSize);
 
-        int hitCount = 0;
+        // Collect affected chunks and dig the foreground.
+        var affectedChunks = new List<(Vector2Int key, DestructibleTerrainChunk chunk)>();
         for (int x = startX; x <= endX; x++)
         {
             for (int y = startY; y <= endY; y++)
             {
-                if (chunks.TryGetValue(new Vector2Int(x, y), out var chunk))
+                var key = new Vector2Int(x, y);
+                if (chunks.TryGetValue(key, out var chunk))
                 {
-                    chunk.MineHole(localPos, radius, circleSegments);
-                    hitCount++;
+                    chunk.MineHole(localPos, radius, circleSegments, minFragmentArea);
+                    affectedChunks.Add((key, chunk));
                 }
             }
         }
 
-        if (hitCount == 0)
+        if (affectedChunks.Count == 0)
         {
             Debug.LogWarning($"[DestructibleTerrain] Dig at local {localPos} (world {worldPos}) missed all chunks. Grid range: ({startX},{startY})-({endX},{endY}). Tracked chunks: {chunks.Count}");
+            return;
         }
-    }
 
-    private Vector2 GetSunDirection()
-    {
-        Vector2 dir = sunTransform != null ? (Vector2)transform.InverseTransformDirection(sunTransform.right) : sunDirection;
-        if (dir.sqrMagnitude < 0.0001f) dir = new Vector2(0.5f, -1f);
-        return dir.normalized;
+        // Compute wall shadow inset across all affected chunks at once so
+        // chunk boundary edges stay flush (no visible seams between shadows).
+        if (shadowInset > 0f && generateBackgroundWall)
+        {
+            // Merge the post-dig foreground paths from all affected chunks.
+            PathsD merged = new PathsD();
+            foreach (var (key, chunk) in affectedChunks)
+            {
+                PathsD chunkPaths = chunk.GetPaths();
+                if (chunkPaths != null)
+                    merged.AddRange(chunkPaths);
+            }
+
+            // Compute the inset on the merged region.
+            PathsD mergedInset = merged;
+            if (merged.Count > 0)
+            {
+                PathsD insetResult = Clipper.InflatePaths(merged, -shadowInset,
+                    Clipper2Lib.JoinType.Round, Clipper2Lib.EndType.Polygon, 2, 2);
+                if (insetResult != null && insetResult.Count > 0)
+                    mergedInset = insetResult;
+            }
+
+            // Clip the merged inset back to each chunk's rect and push to walls.
+            float bleed = 0.05f;
+            foreach (var (key, chunk) in affectedChunks)
+            {
+                PathD chunkRect = new PathD(4);
+                chunkRect.Add(new PointD(key.x * chunkSize - bleed, key.y * chunkSize - bleed));
+                chunkRect.Add(new PointD((key.x + 1) * chunkSize + bleed, key.y * chunkSize - bleed));
+                chunkRect.Add(new PointD((key.x + 1) * chunkSize + bleed, (key.y + 1) * chunkSize + bleed));
+                chunkRect.Add(new PointD(key.x * chunkSize - bleed, (key.y + 1) * chunkSize + bleed));
+
+                PathsD wallPaths = Clipper.Intersect(mergedInset, new PathsD { chunkRect }, FillRule.NonZero, 2);
+                if (wallPaths == null || wallPaths.Count == 0)
+                    wallPaths = chunk.GetPaths();
+
+                chunk.SetWallPaths(wallPaths);
+            }
+        }
     }
 
     private void OnDrawGizmosSelected()
     {
         Gizmos.color = Color.yellow;
         Gizmos.DrawWireCube(transform.position + new Vector3(chunkSize * 1f, -chunkSize * 1f, 0), new Vector3(chunkSize * 2f, chunkSize * 2f, 1));
-        
+
         if (chunks != null)
         {
             Gizmos.color = new Color(0, 1, 0, 0.2f);

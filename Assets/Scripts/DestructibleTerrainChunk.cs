@@ -17,83 +17,136 @@ public class DestructibleTerrainChunk : MonoBehaviour
     private Color terrainColor;
     private bool dirty = false;
     private Mesh cachedMesh;
-    
+
     // Cache reflection lookups to save CPU
     private static FieldInfo shapePathField;
-    private static FieldInfo pathCountField;
+    private static FieldInfo shadowCastingSourceField;
+    private static FieldInfo shapePathHashField;
+    private static FieldInfo forceShadowRebuildField;
     private static bool reflectionInitialized = false;
 
-    // Depth-based vertex darkening settings
-    private float fogFadeEnd = 5f;
-    private float fogOpacity = 0.95f;
-    private float fogAggressiveness = 1f;
-    private bool fogEnabled = true;
-    private Vector2 sunDirection = new Vector2(0.5f, -1f);
-    private Vector2 sunOrigin = Vector2.zero;
-    private float sunMinProjection = 0f;
-    private float sunMaxProjection = 1f;
+    // Flags to skip unnecessary work on specific chunk types
+    private bool skipShadowCaster = false;
+    private bool skipCollider = false;
 
-    public void SetFogSettings(float fadeDistance, float opacity)
+    // Cached to avoid per-frame string comparison and GetComponent calls
+    private bool isWallChunk = false;
+    private bool isWallChunkResolved = false;
+    private ShadowCaster2D cachedShadowCaster;
+
+    private bool IsWallChunk
     {
-        fogFadeEnd = fadeDistance;
-        fogOpacity = opacity;
+        get
+        {
+            if (!isWallChunkResolved)
+            {
+                isWallChunk = skipCollider || name.StartsWith("Wall_");
+                isWallChunkResolved = true;
+            }
+            return isWallChunk;
+        }
     }
 
-    public void SetFogAggressiveness(float aggressiveness)
+    // Shadow caster debounce: batch rapid digs into fewer shadow rebuilds
+    private bool shadowDirty = false;
+    private float shadowCooldown = 0.15f;
+    private float shadowTimer = 0f;
+
+    // Clipper-based shadow inset (replaces URP trimEdge which doesn't work in ShapeEditor mode)
+    private float shadowInset = 0f;
+    private PathsD cachedInsetPaths = null;
+
+    // Camera frustum culling for wall shadow casters
+    private static Camera cachedCamera;
+    private static int cachedCameraFrame = -1;
+    private static Plane[] cachedFrustumPlanes = new Plane[6];
+    private Bounds chunkWorldBounds;
+    private bool boundsInitialized = false;
+
+    /// <summary>
+    /// Configure this chunk to skip shadow caster creation (e.g. foreground chunks
+    /// that never cast shadows). Also optionally skip collider for visual-only chunks.
+    /// Call before Initialize.
+    /// </summary>
+    public void SetSkipFlags(bool noShadowCaster, bool noCollider)
     {
-        fogAggressiveness = Mathf.Max(0.01f, aggressiveness);
+        skipShadowCaster = noShadowCaster;
+        skipCollider = noCollider;
+        isWallChunk = noCollider;
+        isWallChunkResolved = true;
     }
 
-    public void SetFogEnabled(bool enabled)
+    /// <summary>
+    /// Set the inset distance for the shadow shape. Positive values shrink the
+    /// shadow polygon inward, creating a light-bleed zone at cave edges.
+    /// Call before Initialize.
+    /// </summary>
+    public void SetShadowInset(float inset)
     {
-        fogEnabled = enabled;
-    }
-
-    public void SetSunDirection(Vector2 direction)
-    {
-        if (direction.sqrMagnitude < 0.0001f) direction = new Vector2(0.5f, -1f);
-        sunDirection = direction.normalized;
-    }
-
-    public void SetSunOrigin(Vector2 origin)
-    {
-        sunOrigin = origin;
-    }
-
-    public void SetSunProjectionRange(float minProjection, float maxProjection)
-    {
-        sunMinProjection = minProjection;
-        sunMaxProjection = maxProjection;
+        shadowInset = Mathf.Max(0f, inset);
     }
 
     public void Initialize(PathsD paths, Color color, Material mat, string layer, int order)
     {
         myPaths = paths;
+        cachedInsetPaths = null;
         terrainColor = color;
 
-        col = gameObject.GetComponent<PolygonCollider2D>();
-        if (!col) col = gameObject.AddComponent<PolygonCollider2D>();
+        if (!skipCollider)
+        {
+            col = gameObject.GetComponent<PolygonCollider2D>();
+            if (!col) col = gameObject.AddComponent<PolygonCollider2D>();
+        }
+        else
+        {
+            // Remove any existing collider on visual-only chunks
+            var existingCol = gameObject.GetComponent<PolygonCollider2D>();
+            if (existingCol) { if (Application.isPlaying) Destroy(existingCol); else DestroyImmediate(existingCol); }
+            col = null;
+        }
 
-        meshFilter = gameObject.GetComponent<MeshFilter>();
-        if (!meshFilter) meshFilter = gameObject.AddComponent<MeshFilter>();
+        if (!skipCollider)
+        {
+            meshFilter = gameObject.GetComponent<MeshFilter>();
+            if (!meshFilter) meshFilter = gameObject.AddComponent<MeshFilter>();
 
-        meshRenderer = gameObject.GetComponent<MeshRenderer>();
-        if (!meshRenderer) meshRenderer = gameObject.AddComponent<MeshRenderer>();
+            meshRenderer = gameObject.GetComponent<MeshRenderer>();
+            if (!meshRenderer) meshRenderer = gameObject.AddComponent<MeshRenderer>();
 
-        if (mat != null) 
-            meshRenderer.sharedMaterial = mat;
-        else if (meshRenderer.sharedMaterial == null)
-            meshRenderer.sharedMaterial = new Material(Shader.Find("Universal Render Pipeline/2D/Sprite-Lit-Default"));
+            if (mat != null)
+                meshRenderer.sharedMaterial = mat;
+            else if (meshRenderer.sharedMaterial == null)
+                meshRenderer.sharedMaterial = new Material(Shader.Find("Universal Render Pipeline/2D/Sprite-Lit-Default"));
 
-        meshRenderer.sortingLayerName = layer;
-        meshRenderer.sortingOrder = order;
+            meshRenderer.sortingLayerName = layer;
+            meshRenderer.sortingOrder = order;
+        }
+        else
+        {
+            // Wall chunks don't need visible rendering — remove any existing
+            // MeshRenderer/MeshFilter so nothing can re-enable them.
+            var existingRenderer = gameObject.GetComponent<MeshRenderer>();
+            if (existingRenderer) { if (Application.isPlaying) Destroy(existingRenderer); else DestroyImmediate(existingRenderer); }
+            var existingFilter = gameObject.GetComponent<MeshFilter>();
+            if (existingFilter) { if (Application.isPlaying) Destroy(existingFilter); else DestroyImmediate(existingFilter); }
+            meshFilter = null;
+            meshRenderer = null;
+        }
 
-        SyncCollider();
-        UpdateMesh();
+        if (!skipCollider) SyncCollider();
+        if (!skipCollider) UpdateMesh();
 
-        // Add per-chunk shadow caster — uses the PolygonCollider2D as shape source
-        var shadowCaster = gameObject.GetComponent<ShadowCaster2D>();
-        if (!shadowCaster) shadowCaster = gameObject.AddComponent<ShadowCaster2D>();
+        // Compute frustum culling bounds from path data for wall chunks.
+        if (skipCollider)
+            chunkWorldBounds = ComputeWorldBoundsFromPaths();
+
+        // Only add shadow caster when needed (walls cast shadows, foreground doesn't)
+        if (!skipShadowCaster)
+        {
+            cachedShadowCaster = gameObject.GetComponent<ShadowCaster2D>();
+            if (!cachedShadowCaster) cachedShadowCaster = gameObject.AddComponent<ShadowCaster2D>();
+            SyncShadowCaster();
+        }
     }
 
     /// <summary>
@@ -103,9 +156,16 @@ public class DestructibleTerrainChunk : MonoBehaviour
     /// </summary>
     private void EnsureReady()
     {
-        if (col == null) col = GetComponent<PolygonCollider2D>();
+        if (!skipCollider && col == null) col = GetComponent<PolygonCollider2D>();
         if (meshFilter == null) meshFilter = GetComponent<MeshFilter>();
         if (meshRenderer == null) meshRenderer = GetComponent<MeshRenderer>();
+
+        // Recover non-serialized flags for wall chunks loaded from scene.
+        if (!skipCollider && name.StartsWith("Wall_"))
+        {
+            skipCollider = true;
+            skipShadowCaster = false;
+        }
 
         // Recover terrain color from the parent manager (it's serialized there)
         if (terrainColor.a < 0.01f)
@@ -117,6 +177,9 @@ public class DestructibleTerrainChunk : MonoBehaviour
                 terrainColor = new Color(0.35f, 0.22f, 0.13f, 1f);
         }
 
+        // Rebuild paths from collider if available (foreground chunks only).
+        // Wall chunks (skipCollider=true) have no collider — their myPaths
+        // are set by Initialize and kept in sync by MineHole propagation.
         if (myPaths == null && col != null && col.pathCount > 0)
         {
             myPaths = new PathsD();
@@ -130,14 +193,54 @@ public class DestructibleTerrainChunk : MonoBehaviour
             }
             Debug.Log($"[Chunk {name}] Rebuilt {myPaths.Count} paths from collider.");
         }
+
+        // If this is a wall chunk loaded from scene serialization (no collider,
+        // non-serialized myPaths lost), copy the parent's current paths.
+        if (myPaths == null && skipCollider)
+        {
+            var parentChunk = transform.parent != null ? transform.parent.GetComponent<DestructibleTerrainChunk>() : null;
+            if (parentChunk != null && parentChunk.myPaths != null)
+            {
+                myPaths = new PathsD(parentChunk.myPaths.Count);
+                foreach (var p in parentChunk.myPaths)
+                {
+                    PathD copy = new PathD(p.Count);
+                    foreach (var pt in p) copy.Add(new PointD(pt.x, pt.y));
+                    myPaths.Add(copy);
+                }
+                cachedInsetPaths = null;
+            }
+        }
+
+        // Wall chunks are non-serialized at runtime and can lose this value.
+        // Recover the configured inset from the parent terrain manager.
+        // Use IsWallChunk because skipCollider is not serialized and resets on scene load.
+        if (IsWallChunk && shadowInset <= 0f)
+        {
+            var terrain = GetComponentInParent<DestructibleTerrain>();
+            if (terrain != null)
+                shadowInset = Mathf.Max(0f, terrain.shadowInset);
+        }
+
+        // Seed frustum culling bounds for serialized chunks.
+        if (!boundsInitialized)
+        {
+            if (IsWallChunk && myPaths != null && myPaths.Count > 0)
+            {
+                chunkWorldBounds = ComputeWorldBoundsFromPaths();
+            }
+            else if (meshRenderer != null && meshRenderer.bounds.size != Vector3.zero)
+            {
+                chunkWorldBounds = meshRenderer.bounds;
+                boundsInitialized = true;
+            }
+        }
     }
 
-    public void MineHole(Vector2 localPos, float radius, int circleSegments)
+    public void MineHole(Vector2 localPos, float radius, int circleSegments, float minFragmentArea = 0.5f)
     {
         EnsureReady();
         if (myPaths == null || myPaths.Count == 0) return;
-
-        bool changed = false;
 
         // Create the circular hole path
         PathD clipPath = new PathD(circleSegments);
@@ -153,73 +256,232 @@ public class DestructibleTerrainChunk : MonoBehaviour
         // Subtract the hole from the terrain using Clipper's Difference
         PathsD result = Clipper.Difference(myPaths, new PathsD { clipPath }, FillRule.NonZero, 2);
 
-        if (result != null && result.Count > 0 && result.Count <= myPaths.Count + 10) // Basic sanity check
+        if (result == null) return;
+
+        result = Clipper.SimplifyPaths(result, 0.05, false);
+
+        // Remove tiny remnant fragments that are too small to matter.
+        if (minFragmentArea > 0f)
         {
-            myPaths = Clipper.SimplifyPaths(result, 0.05, false); 
-            changed = true;
+            for (int i = result.Count - 1; i >= 0; i--)
+            {
+                if (result[i] == null || result[i].Count < 3 ||
+                    System.Math.Abs(Clipper.Area(result[i])) < minFragmentArea)
+                    result.RemoveAt(i);
+            }
         }
 
-        if (!changed) return;
+        myPaths = result;
+        cachedInsetPaths = null;
 
-        // Propagate digging to any wall chunks (children)
-        foreach (Transform child in transform)
-        {
-            var childChunk = child.GetComponent<DestructibleTerrainChunk>();
-            if (childChunk != null)
-                childChunk.MineHole(localPos, radius, circleSegments);
-        }
+        // Wall propagation is now handled by DestructibleTerrain.MineHole
+        // which computes a unified inset across all affected chunks.
 
         dirty = true;
     }
 
+    private void SetPathsFromParent(PathsD paths)
+    {
+        myPaths = paths;
+        cachedInsetPaths = null;
+        dirty = true;
+    }
+
+    /// <summary>
+    /// Returns the current foreground paths for this chunk.
+    /// Used by DestructibleTerrain to merge paths across chunks for unified inset.
+    /// </summary>
+    public PathsD GetPaths() => myPaths;
+
+    /// <summary>
+    /// Push pre-inset wall paths to this chunk's wall children.
+    /// Called by DestructibleTerrain after computing a unified inset across affected chunks.
+    /// </summary>
+    public void SetWallPaths(PathsD wallPaths)
+    {
+        foreach (Transform child in transform)
+        {
+            var childChunk = child.GetComponent<DestructibleTerrainChunk>();
+            if (childChunk != null)
+                childChunk.SetPathsFromParent(wallPaths);
+        }
+    }
+
     private void LateUpdate()
     {
+        // One-time init for serialized chunks: seed bounds and recover flags.
+        if (!boundsInitialized)
+            EnsureReady();
+
         if (dirty)
         {
-            SyncCollider();
-            SyncShadowCaster();
-            UpdateMesh();
+            EnsureReady();
+            if (!skipCollider) SyncCollider();
+            if (!IsWallChunk) UpdateMesh();
+            else chunkWorldBounds = ComputeWorldBoundsFromPaths();
             dirty = false;
+
+            // Walls should update shadow immediately when dug.
+            if (!skipShadowCaster && IsWallChunk)
+            {
+                SyncShadowCaster();
+                shadowDirty = false;
+            }
+            else if (!skipShadowCaster)
+            {
+                shadowDirty = true;
+                shadowTimer = shadowCooldown;
+            }
+        }
+
+        // Only wall chunks need per-frame visibility management.
+        if (IsWallChunk && !skipShadowCaster)
+        {
+            UpdateShadowCasterVisibility();
+
+            // Debounce shadow caster updates — batch rapid digs
+            if (shadowDirty)
+            {
+                shadowTimer -= Time.deltaTime;
+                if (shadowTimer <= 0f)
+                {
+                    SyncShadowCaster();
+                    shadowDirty = false;
+                }
+            }
         }
     }
 
     private void SyncShadowCaster()
     {
-        var sc = GetComponent<ShadowCaster2D>();
-        if (sc == null || myPaths == null) return;
+        if (cachedShadowCaster == null) cachedShadowCaster = GetComponent<ShadowCaster2D>();
+        var sc = cachedShadowCaster;
+        if (sc == null || myPaths == null || myPaths.Count == 0) return;
 
         if (!reflectionInitialized)
         {
             var type = typeof(ShadowCaster2D);
             shapePathField = type.GetField("m_ShapePath", BindingFlags.NonPublic | BindingFlags.Instance);
-            pathCountField = type.GetField("m_PathCount", BindingFlags.NonPublic | BindingFlags.Instance);
+            shadowCastingSourceField = type.GetField("m_ShadowCastingSource", BindingFlags.NonPublic | BindingFlags.Instance);
+            shapePathHashField = type.GetField("m_ShapePathHash", BindingFlags.NonPublic | BindingFlags.Instance);
+            forceShadowRebuildField = type.GetField("m_ForceShadowMeshRebuild", BindingFlags.NonPublic | BindingFlags.Instance);
             reflectionInitialized = true;
         }
 
-        if (shapePathField != null)
+        try
         {
-            try {
-                int totalPoints = 0;
-                foreach (var p in myPaths) totalPoints += p.Count;
-                
-                Vector3[] pts = new Vector3[totalPoints];
-                int idx = 0;
-                foreach (var p in myPaths)
-                {
-                    foreach (var pt in p)
-                    {
-                        pts[idx++] = new Vector3((float)pt.x, (float)pt.y, 0f);
-                    }
-                }
-                shapePathField.SetValue(sc, pts);
-                if (pathCountField != null) pathCountField.SetValue(sc, myPaths.Count);
-            } catch { /* Suppress */ }
+            if (shapePathField == null) return;
+
+            // Use inset paths so visible mesh + shadow stay consistent.
+            PathsD shadowPaths = GetInsetPaths();
+            if (shadowPaths == null || shadowPaths.Count == 0) return;
+
+            // Find the largest valid path without allocating a temp list.
+            PathD largestPath = null;
+            double largestArea = 0;
+            foreach (var p in shadowPaths)
+            {
+                if (p == null || p.Count < 3) continue;
+                double a = System.Math.Abs(Clipper.Area(p));
+                if (a > largestArea) { largestArea = a; largestPath = p; }
+            }
+
+            if (largestPath == null) return;
+            SetShadowPath(sc, largestPath, 0);
         }
+        catch { /* Suppress reflection errors on incompatible URP versions */ }
+    }
+
+    private void SetShadowPath(ShadowCaster2D caster, PathD path, int index)
+    {
+        if (caster == null || path == null || path.Count < 3) return;
+
+        if (shadowCastingSourceField != null)
+            shadowCastingSourceField.SetValue(caster, System.Enum.ToObject(shadowCastingSourceField.FieldType, 1));
+
+        Vector3[] pts = new Vector3[path.Count];
+        int hash = path.Count ^ (index * 73856093);
+        for (int i = 0; i < path.Count; i++)
+        {
+            float px = (float)path[i].x;
+            float py = (float)path[i].y;
+            pts[i] = new Vector3(px, py, 0f);
+            hash = hash * 31 + px.GetHashCode() ^ py.GetHashCode();
+        }
+
+        shapePathField.SetValue(caster, pts);
+        if (shapePathHashField != null)
+            shapePathHashField.SetValue(caster, hash);
+        if (forceShadowRebuildField != null)
+            forceShadowRebuildField.SetValue(caster, true);
+    }
+
+    private void UpdateShadowCasterVisibility()
+    {
+        if (cachedShadowCaster == null) cachedShadowCaster = GetComponent<ShadowCaster2D>();
+        var sc = cachedShadowCaster;
+        if (sc == null) return;
+
+        bool shouldEnable = IsChunkInView();
+
+        if (sc.enabled != shouldEnable)
+        {
+            sc.enabled = shouldEnable;
+            if (shouldEnable)
+            {
+                // When becoming visible again, force one sync so the shadow is current.
+                SyncShadowCaster();
+            }
+        }
+    }
+
+    private bool IsChunkInView()
+    {
+        // Cache frustum planes once per frame across all chunks.
+        int frame = Time.frameCount;
+        if (frame != cachedCameraFrame)
+        {
+            cachedCamera = Camera.main;
+            if (cachedCamera != null)
+                GeometryUtility.CalculateFrustumPlanes(cachedCamera, cachedFrustumPlanes);
+            cachedCameraFrame = frame;
+        }
+
+        if (cachedCamera == null) return true;
+
+        // Expand bounds to account for shadow reach beyond the visible mesh.
+        Bounds padded = chunkWorldBounds;
+        padded.Expand(shadowInset + 5f);
+        return GeometryUtility.TestPlanesAABB(cachedFrustumPlanes, padded);
+    }
+
+    private Bounds ComputeWorldBoundsFromPaths()
+    {
+        float minX = float.MaxValue, minY = float.MaxValue;
+        float maxX = float.MinValue, maxY = float.MinValue;
+        foreach (var p in myPaths)
+        {
+            foreach (var pt in p)
+            {
+                float px = (float)pt.x;
+                float py = (float)pt.y;
+                if (px < minX) minX = px;
+                if (px > maxX) maxX = px;
+                if (py < minY) minY = py;
+                if (py > maxY) maxY = py;
+            }
+        }
+        Vector3 center = transform.TransformPoint(new Vector3((minX + maxX) * 0.5f, (minY + maxY) * 0.5f, 0f));
+        Vector3 size = new Vector3(maxX - minX, maxY - minY, 0.1f);
+        boundsInitialized = true;
+        return new Bounds(center, size);
     }
 
     private void SyncCollider()
     {
         if (myPaths == null) return;
+        if (col == null) col = GetComponent<PolygonCollider2D>();
+        if (col == null) return;
         col.pathCount = myPaths.Count;
         for (int i = 0; i < myPaths.Count; i++)
         {
@@ -230,6 +492,25 @@ public class DestructibleTerrainChunk : MonoBehaviour
         }
     }
 
+    /// <summary>
+    /// Compute the inset paths used for both the wall mesh and shadow shape.
+    /// Cached so InflatePaths only runs once per path change, not per consumer.
+    /// Returns myPaths unchanged when shadowInset is zero or this is a foreground chunk.
+    /// </summary>
+    private PathsD GetInsetPaths()
+    {
+        if (shadowInset <= 0f || myPaths == null || myPaths.Count == 0)
+            return myPaths;
+
+        if (cachedInsetPaths == null)
+        {
+            PathsD insetPaths = Clipper.InflatePaths(myPaths, -shadowInset,
+                Clipper2Lib.JoinType.Round, Clipper2Lib.EndType.Polygon, 2, 2);
+            cachedInsetPaths = (insetPaths != null && insetPaths.Count > 0) ? insetPaths : myPaths;
+        }
+        return cachedInsetPaths;
+    }
+
     private void UpdateMesh()
     {
         if (myPaths == null || myPaths.Count == 0)
@@ -238,7 +519,11 @@ public class DestructibleTerrainChunk : MonoBehaviour
             return;
         }
 
-        if (Clipper.Triangulate(myPaths, 2, out PathsD triangles) != TriangulateResult.success)
+        // Wall chunks use the inset shape for their visible mesh so the
+        // light-bleed zone at cave edges isn't covered by the wall.
+        PathsD meshPaths = (!skipShadowCaster && shadowInset > 0f) ? GetInsetPaths() : myPaths;
+
+        if (Clipper.Triangulate(meshPaths, 2, out PathsD triangles) != TriangulateResult.success)
         {
             Debug.LogWarning($"[Chunk {name}] Triangulation failed for {myPaths.Count} paths.");
             return;
@@ -248,29 +533,6 @@ public class DestructibleTerrainChunk : MonoBehaviour
         {
             Debug.LogWarning($"[Chunk {name}] Triangulate success but 0 triangles returned.");
         }
-
-        // Build edge segments for distance-to-boundary calculation
-        int totalSegments = 0;
-        foreach (var path in myPaths)
-            totalSegments += path.Count;
-
-        Vector2[] segA = new Vector2[totalSegments];
-        Vector2[] segB = new Vector2[totalSegments];
-        int segIdx = 0;
-        foreach (var path in myPaths)
-        {
-            int count = path.Count;
-            for (int s = 0; s < count; s++)
-            {
-                int next = (s + 1) % count;
-                segA[segIdx] = new Vector2((float)path[s].x, (float)path[s].y);
-                segB[segIdx] = new Vector2((float)path[next].x, (float)path[next].y);
-                segIdx++;
-            }
-        }
-
-        float invFadeEnd = fogFadeEnd > 0f ? 1f / fogFadeEnd : 1f;
-        Vector2 lightDir = -sunDirection.normalized;
 
         int triCount = triangles.Count;
         Vector3[] vertices = new Vector3[triCount * 3];
@@ -295,37 +557,11 @@ public class DestructibleTerrainChunk : MonoBehaviour
                 vertices[idx] = new Vector3(px, py, 0);
                 uvs[idx] = new Vector2(px * 0.2f, py * 0.2f);
                 indices[idx] = idx;
-
-                float brightness = 1f;
-                if (fogEnabled)
-                {
-                    // Compute distance to nearest polygon edge segment
-                    float minDistSqr = float.MaxValue;
-                    for (int e = 0; e < totalSegments; e++)
-                    {
-                        float distSqr = SqrDistToSegment(px, py, segA[e], segB[e]);
-                        if (distSqr < minDistSqr) minDistSqr = distSqr;
-                    }
-
-                    // 0 = on edge (full brightness), 1 = deep (darkened toward black)
-                    float depth = Mathf.Clamp01(Mathf.Sqrt(minDistSqr) * invFadeEnd);
-                    depth = Mathf.Pow(depth, fogAggressiveness);
-                    Vector2 worldPos = new Vector2(px, py);
-                    float projection = Vector2.Dot(worldPos - sunOrigin, -lightDir);
-                    float directional = Mathf.InverseLerp(sunMinProjection, sunMaxProjection, projection);
-                    brightness = Mathf.Clamp01((1f - depth * fogOpacity) * (0.6f + directional * 0.4f));
-                }
-
-                // Vertex colors always carry the terrain tint directly.
-                colors[idx] = new Color(
-                    terrainColor.r * brightness,
-                    terrainColor.g * brightness,
-                    terrainColor.b * brightness,
-                    1f);
+                colors[idx] = terrainColor;
             }
         }
 
-        if (!cachedMesh) 
+        if (!cachedMesh)
         {
             cachedMesh = new Mesh();
             cachedMesh.name = "ChunkMesh_" + name;
@@ -339,27 +575,10 @@ public class DestructibleTerrainChunk : MonoBehaviour
         cachedMesh.RecalculateBounds();
         cachedMesh.RecalculateNormals();
         meshFilter.sharedMesh = cachedMesh;
-    }
 
-    /// <summary>
-    /// Squared distance from point (px,py) to the closest point on line segment AB.
-    /// </summary>
-    private static float SqrDistToSegment(float px, float py, Vector2 a, Vector2 b)
-    {
-        float abx = b.x - a.x;
-        float aby = b.y - a.y;
-        float apx = px - a.x;
-        float apy = py - a.y;
-
-        float dot = apx * abx + apy * aby;
-        float lenSqr = abx * abx + aby * aby;
-
-        // t = projection of P onto AB, clamped to [0,1]
-        float t = lenSqr > 0f ? Mathf.Clamp01(dot / lenSqr) : 0f;
-
-        float closestX = a.x + t * abx - px;
-        float closestY = a.y + t * aby - py;
-        return closestX * closestX + closestY * closestY;
+        // Update world bounds for frustum culling.
+        chunkWorldBounds = meshRenderer.bounds;
+        boundsInitialized = true;
     }
 
     private void OnDestroy()

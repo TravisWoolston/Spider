@@ -147,14 +147,12 @@ public class SpiderControllerIK : MonoBehaviour
             Vector2 outward = (Vector2)headT.right * sideSign + (Vector2)(-headT.up);
             outward.Normalize();
 
-            // Exclude Dirt layer so feet don't plant underground
-            LayerMask plantMask = attachableLayers & ~(1 << dirtLayer);
-            RaycastHit2D hit = Physics2D.Raycast(headPos, outward, reach, plantMask);
+            RaycastHit2D hit = Physics2D.Raycast(headPos, outward, reach, attachableLayers);
 
             if (hit.collider == null)
             {
                 hit = Physics2D.Raycast(headPos + (Vector2)headT.right * sideSign * reach * 0.5f,
-                                        -headT.up, sightDistance, plantMask);
+                                        -headT.up, sightDistance, attachableLayers);
             }
 
             if (hit.collider != null)
@@ -321,10 +319,6 @@ public class SpiderControllerIK : MonoBehaviour
                     var hit = hitBuffer[j];
                     if (hit.collider == null) continue;
 
-                    // Skip Dirt layer – rays should never attach feet underground
-                    if (hit.collider.gameObject.layer == dirtLayer)
-                        continue;
-
                     float dist = Vector2.Distance(hit.point, origin);
                     if (hit.collider.gameObject.layer == webLayer && dist < 1.0f)
                         continue;
@@ -373,10 +367,6 @@ public class SpiderControllerIK : MonoBehaviour
                     {
                         var hit = hitBuffer[j];
                         if (hit.collider == null) continue;
-
-                        // Skip Dirt layer – no underground attachment
-                        if (hit.collider.gameObject.layer == dirtLayer)
-                            continue;
 
                         float distFromHead = Vector2.Distance(hit.point, origin);
                         
@@ -850,7 +840,9 @@ public class SpiderControllerIK : MonoBehaviour
         int groundPlanted = 0;
         foreach (var leg in legs)
         {
-            if (leg.isPlanted && leg.plantedTransform != null && leg.plantedTransform.gameObject.layer != webLayer)
+            if (!leg.isPlanted || leg.plantedTransform == null) continue;
+            int legLayer = leg.plantedTransform.gameObject.layer;
+            if (legLayer != webLayer && legLayer != dirtLayer)
                 groundPlanted++;
         }
         groundFactor = (float)groundPlanted / Mathf.Max(1, planted);
@@ -871,11 +863,21 @@ public class SpiderControllerIK : MonoBehaviour
         }
         float strandFactor = (float)maxOnSameStrand / Mathf.Max(1, planted);
 
-        Vector2 avgNormal;
+        // Measure how coherent the planted normals are (1 = all agree, ~0 = opposing).
+        float normalCoherence = normalSum.magnitude / Mathf.Max(1, planted);
+
+        Vector2 rawAvgNormal;
         if (normalSum.sqrMagnitude < 0.01f)
-            avgNormal = (Vector2)headT.up;
+            rawAvgNormal = (Vector2)headT.up;
         else
-            avgNormal = normalSum.normalized;
+            rawAvgNormal = normalSum.normalized;
+
+        // When normals are incoherent (tight spaces with floor + ceiling feet),
+        // smooth the surface normal very slowly so it doesn't flip toward the ceiling.
+        float normalSmoothRate = normalCoherence > 0.5f ? 8f : 1.5f;
+        currentSurfaceNormal = Vector2.Lerp(currentSurfaceNormal, rawAvgNormal,
+            Time.fixedDeltaTime * normalSmoothRate).normalized;
+        Vector2 avgNormal = currentSurfaceNormal;
 
         float num = 0, den = 0;
         Vector2 center = (avgFootPos / planted);
@@ -904,19 +906,46 @@ public class SpiderControllerIK : MonoBehaviour
             float diff1 = Mathf.Abs(Mathf.DeltaAngle(currentAngle, targetAngle));
             float diff2 = Mathf.Abs(Mathf.DeltaAngle(currentAngle, altAngle));
 
+            // Hysteresis: strongly prefer the current orientation to prevent rapid flipping.
+            // The alternative must be significantly closer (by this margin) to win.
+            float hysteresis = 30f;
+
             if (groundFactor > 0.3f)
             {
                 float normAngle = Mathf.Atan2(avgNormal.y, avgNormal.x) * Mathf.Rad2Deg - 90f;
-                if (Mathf.Abs(Mathf.DeltaAngle(normAngle, altAngle)) < Mathf.Abs(Mathf.DeltaAngle(normAngle, targetAngle)))
-                    targetAngle = altAngle;
+                float normDiff1 = Mathf.Abs(Mathf.DeltaAngle(normAngle, targetAngle));
+                float normDiff2 = Mathf.Abs(Mathf.DeltaAngle(normAngle, altAngle));
+
+                if (normalCoherence > 0.4f)
+                {
+                    // Normal is reliable: use it, but still apply hysteresis
+                    // favouring whichever candidate is closer to current rotation.
+                    if (normDiff2 < normDiff1)
+                    {
+                        // Alt is better per normal; only switch if current rotation
+                        // isn't already much closer to the original candidate.
+                        if (diff1 > diff2 + hysteresis)
+                            targetAngle = altAngle;
+                        else if (diff2 < diff1)
+                            targetAngle = altAngle;
+                    }
+                    // else: targetAngle is already the better normal-aligned candidate
+                }
+                else
+                {
+                    // Normal is unreliable (tight space): fall back to current rotation
+                    if (diff2 + hysteresis < diff1)
+                        targetAngle = altAngle;
+                }
             }
-            else if (diff2 < diff1)
+            else
             {
-                targetAngle = altAngle;
+                // No strong ground contact: prefer current rotation with hysteresis
+                if (diff2 + hysteresis < diff1)
+                    targetAngle = altAngle;
             }
         }
 
-        currentSurfaceNormal = avgNormal;
         Quaternion stableRot = Quaternion.Euler(0, 0, targetAngle);
 
         Vector2 posSum = Vector2.zero;
@@ -930,22 +959,58 @@ public class SpiderControllerIK : MonoBehaviour
 
         Vector2 targetPos = (posSum / planted);
 
+        // Surface-push raycast: prevent body from clipping into terrain.
+        // When normals are incoherent (tight space), cast in multiple directions
+        // and push away from the nearest surface to stay centered.
         float searchRadius = bodyHeight > 0 ? bodyHeight * 2.0f : 2.0f;
-        LayerMask bodyCheckMask = attachableLayers & ~(1 << dirtLayer);
-        RaycastHit2D centerHit = Physics2D.Raycast(targetPos + avgNormal * searchRadius, -avgNormal, searchRadius * 2.0f, bodyCheckMask);
-        if (centerHit.collider != null)
+        LayerMask bodyCheckMask = attachableLayers;
+
+        if (normalCoherence > 0.5f)
         {
-            float surfaceProg = Vector2.Dot(centerHit.point, avgNormal);
-            float targetProg = Vector2.Dot(targetPos, avgNormal);
-            if (targetProg < surfaceProg)
+            // Single-direction push along the reliable avgNormal
+            RaycastHit2D centerHit = Physics2D.Raycast(targetPos + avgNormal * searchRadius, -avgNormal, searchRadius * 2.0f, bodyCheckMask);
+            if (centerHit.collider != null)
             {
-                targetPos += avgNormal * (surfaceProg - targetProg);
+                float surfaceProg = Vector2.Dot(centerHit.point, avgNormal);
+                float targetProg = Vector2.Dot(targetPos, avgNormal);
+                if (targetProg < surfaceProg)
+                {
+                    targetPos += avgNormal * (surfaceProg - targetProg);
+                }
+            }
+        }
+        else
+        {
+            // Tight space: cast in 4 cardinal directions and push away from
+            // the closest surface to keep the body centered in the tunnel.
+            Vector2[] pushDirs = { Vector2.up, Vector2.down, Vector2.left, Vector2.right };
+            float pushRadius = searchRadius > 1f ? searchRadius : 2f;
+            float minDist = float.MaxValue;
+            Vector2 pushNormal = Vector2.zero;
+
+            for (int d = 0; d < 4; d++)
+            {
+                RaycastHit2D hit = Physics2D.Raycast(targetPos, pushDirs[d], pushRadius, bodyCheckMask);
+                if (hit.collider != null && hit.distance < minDist)
+                {
+                    minDist = hit.distance;
+                    pushNormal = hit.normal;
+                }
+            }
+
+            if (minDist < pushRadius && pushNormal.sqrMagnitude > 0.01f)
+            {
+                float penetration = Mathf.Max(0f, 1f - minDist);
+                targetPos += pushNormal * penetration;
             }
         }
 
         float confidence = Mathf.Max(groundFactor, strandFactor * 0.7f);
 
-        float effectHeight = bodyHeight * Mathf.Lerp(0.2f, 1.0f, confidence);
+        // Scale down body height offset when normals are incoherent to prevent
+        // the spider being pushed into the ceiling along a confused avgNormal.
+        float coherenceScale = Mathf.Lerp(0.1f, 1.0f, Mathf.Clamp01(normalCoherence * 2f));
+        float effectHeight = bodyHeight * Mathf.Lerp(0.2f, 1.0f, confidence) * coherenceScale;
         float effectLead = bodyLead * Mathf.Lerp(0.4f, 1.0f, confidence);
 
         targetPos += avgNormal * effectHeight;
@@ -957,15 +1022,23 @@ public class SpiderControllerIK : MonoBehaviour
 
         Vector2 toTarget = targetPos - headRb.position;
 
+        // Count actively digging legs to dampen body movement during dig cycles.
+        int diggingCount = 0;
+        foreach (var leg in legs)
+            if (leg.isDigStriking) diggingCount++;
+        float digDampen = diggingCount > 0 ? Mathf.Lerp(1f, 0.4f, (float)diggingCount / Mathf.Max(1, legs.Length)) : 1f;
+
         float surfaceSmoothing = Mathf.Lerp(bodySmoothing * 0.7f, bodySmoothing, groundFactor);
         float currentSmoothing = (inputDirection.sqrMagnitude > 0.01f) ? surfaceSmoothing : surfaceSmoothing * 0.2f;
+        currentSmoothing *= digDampen;
 
         Vector2 gravityCancel = -Physics2D.gravity * headRb.gravityScale;
 
         headRb.linearVelocity = Vector2.Lerp(headRb.linearVelocity, toTarget * currentSmoothing, Time.fixedDeltaTime * 10f);
         headRb.AddForce(gravityCancel * headRb.mass, ForceMode2D.Force);
 
-        headT.rotation = Quaternion.Slerp(headT.rotation, stableRot, Time.fixedDeltaTime * rotationSpeed);
+        float effectiveRotSpeed = rotationSpeed * digDampen;
+        headT.rotation = Quaternion.Slerp(headT.rotation, stableRot, Time.fixedDeltaTime * effectiveRotSpeed);
         headRb.freezeRotation = true;
 
         if (spiderWeightMult > 0.01f && planted > 0)

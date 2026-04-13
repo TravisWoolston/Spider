@@ -23,6 +23,8 @@ public class SpiderLegIK : MonoBehaviour
     public bool  isLeftSide  = false;
     [Tooltip("Which physical side of the body this leg is on (for targeting)")]
     public bool  isPhysicallyRight = false;
+    [Tooltip("How strongly the leg resists flipping its knee. Higher = flips less frequently (0 to 1)")]
+    public float kneeFlipThreshold = 0.4f;
 
     [Header("LimbSolver Mode")]
     public Transform ikTarget;
@@ -57,6 +59,16 @@ public class SpiderLegIK : MonoBehaviour
     [HideInInspector] public bool isDigStriking = false;
     private Rigidbody2D footRb;
     private Rigidbody2D shinRb;
+
+    // ── Sparring state ────────────────────────────────────────
+    [HideInInspector] public bool isSparring = false;
+    [HideInInspector] public bool isSparStriking = false;
+    [HideInInspector] public Vector2 sparAimTarget;  // World-space aim point (mouse) during sparring wind-up/strike
+
+    // ── IK Hysteresis state ────────────────────────────────────
+    private bool isKneeFlipped = false;
+    private Vector2 currentIKAngles;
+    private bool hasInitializedAngles = false;
 
     // ── Joint anchor data (read from HingeJoint2Ds at startup) ──
     // These are LOCAL-SPACE positions of the actual joints on each sprite.
@@ -278,9 +290,76 @@ public class SpiderLegIK : MonoBehaviour
         else
             shoulderWorld = thigh.TransformPoint(shoulderOnThigh);
 
-        // ── 2. Solve IK ──
+        // // ── 2. Solve IK ──
         Vector2 toTarget = currentFootPos - shoulderWorld;
-        Vector2 angles = SpiderIKUtility.Solve2BIK(toTarget, thighLength, shinLength, isLeftSide);
+
+        // Dynamically arc knee away from the planted surface normal to avoid clipping
+        Vector2 perpCCW = new Vector2(-toTarget.y, toTarget.x).normalized;
+        float dotCCW = Vector2.Dot(perpCCW, plantedNormal);
+
+        if (isLeftSide)
+        {
+            if (dotCCW < -kneeFlipThreshold) isKneeFlipped = true;
+            else if (dotCCW > kneeFlipThreshold) isKneeFlipped = false;
+        }
+        else
+        {
+            if (dotCCW > kneeFlipThreshold) isKneeFlipped = true;
+            else if (dotCCW < -kneeFlipThreshold) isKneeFlipped = false;
+        }
+
+        // Sparring adjustment: Try to keep knee from hitting walls and stabilize it
+        if (isSparring)
+        {
+            Vector2 shoulderPos = bodyTransform != null ? (Vector2)bodyTransform.TransformPoint(bodyAnchor) : (Vector2)thigh.TransformPoint(shoulderOnThigh);
+            
+            // Check current configuration first
+            Vector2 sparAngles = SpiderIKUtility.Solve2BIK(toTarget, thighLength, shinLength, isLeftSide ? !isKneeFlipped : isKneeFlipped);
+            float sparThighRad = sparAngles.x * Mathf.Deg2Rad;
+            Vector2 kneePos = shoulderPos + new Vector2(Mathf.Cos(sparThighRad), Mathf.Sin(sparThighRad)) * thighLength;
+            
+            float checkDist = 0.8f;
+            bool IsColliding(Vector2 p) => Physics2D.OverlapCircle(p, checkDist, controller.attachableLayers);
+
+            if (IsColliding(kneePos))
+            {
+                // Current Config is colliding - try flipping
+                Vector2 sparAltAngles = SpiderIKUtility.Solve2BIK(toTarget, thighLength, shinLength, isLeftSide ? isKneeFlipped : !isKneeFlipped);
+                float sparAltThighRad = sparAltAngles.x * Mathf.Deg2Rad;
+                Vector2 sparAltKneePos = shoulderPos + new Vector2(Mathf.Cos(sparAltThighRad), Mathf.Sin(sparAltThighRad)) * thighLength;
+                
+                if (!IsColliding(sparAltKneePos))
+                {
+                    isKneeFlipped = !isKneeFlipped;
+                }
+            }
+        }
+
+        bool bendCCW = isLeftSide ? !isKneeFlipped : isKneeFlipped;
+        Vector2 targetAngles = SpiderIKUtility.Solve2BIK(toTarget, thighLength, shinLength, bendCCW);
+
+        if (!hasInitializedAngles)
+        {
+            currentIKAngles = targetAngles;
+            hasInitializedAngles = true;
+        }
+        else
+        {
+            // Organic flip transition: if the knee drastically shifts directions (~180 degrees), 
+            // organically swing the leg through the inversion. If it's a minor delta, tightly glue it.
+            float angleDelta = Mathf.Abs(Mathf.DeltaAngle(currentIKAngles.y, targetAngles.y));
+            if (angleDelta > 15f)
+            {
+                currentIKAngles.x = Mathf.LerpAngle(currentIKAngles.x, targetAngles.x, Time.deltaTime * 15f);
+                currentIKAngles.y = Mathf.LerpAngle(currentIKAngles.y, targetAngles.y, Time.deltaTime * 15f);
+            }
+            else
+            {
+                currentIKAngles = targetAngles;
+            }
+        }
+
+        Vector2 angles = currentIKAngles;
 
         // ── 3. Rotate thigh, then snap its shoulder anchor to shoulderWorld ──
         float thighSpriteAngle = angles.x - thighLocalBoneAngle;
@@ -296,6 +375,18 @@ public class SpiderLegIK : MonoBehaviour
         // ── 5. Rotate shin, then snap its elbow anchor to elbowWorld ──
         float shinBoneAngle = angles.x - angles.y;  // SUBTRACT — knee bends away from thigh direction
         float shinSpriteAngle = shinBoneAngle - shinLocalBoneAngle;
+
+        // Sparring override: force the shin to always point from elbow toward the aim target
+        if (isSparring && sparAimTarget.sqrMagnitude > 0.01f)
+        {
+            Vector2 elbowToAim = sparAimTarget - elbowWorld;
+            if (elbowToAim.sqrMagnitude > 0.01f)
+            {
+                float aimAngle = Mathf.Atan2(elbowToAim.y, elbowToAim.x) * Mathf.Rad2Deg;
+                shinSpriteAngle = aimAngle - shinLocalBoneAngle;
+            }
+        }
+
         shin.rotation = Quaternion.Euler(0, 0, shinSpriteAngle);
         Vector2 currentElbow = shin.TransformPoint(elbowOnShin);
         shin.position += (Vector3)(elbowWorld - currentElbow);
@@ -307,7 +398,7 @@ public class SpiderLegIK : MonoBehaviour
 
     public void StepTo(Vector2 worldTarget, Vector2 normal, Collider2D col = null)
     {
-        if (isStepping) return;
+        if (isStepping || isSparring) return;
         
         // Physical Kick: Apply a force to the object we step on for a realistic look
         if (col != null)
@@ -443,7 +534,7 @@ public class SpiderLegIK : MonoBehaviour
     /// </summary>
     public void DigStrike(Vector2 surfacePoint, Vector2 surfaceNormal, Collider2D surfaceCollider, float windUpDist, float strikeSpeed, float digRadius, float windUpTime, float recoveryTime)
     {
-        if (isDigStriking || isStepping) return;
+        if (isDigStriking || isStepping || isSparring) return;
         StartCoroutine(DigStrikeCoroutine(surfacePoint, surfaceNormal, surfaceCollider, windUpDist, strikeSpeed, digRadius, windUpTime, recoveryTime));
     }
 
@@ -600,6 +691,79 @@ public class SpiderLegIK : MonoBehaviour
         isPlanted = true;
         plantedTimer = 0f;
         isDigStriking = false;
+    }
+
+    // ───────────────────────────────────────────────────────────
+    //  Spar Strike
+    // ───────────────────────────────────────────────────────────
+
+    public void LaunchSparStrike(Vector2 targetPos, float strikeSpeed, Vector2 startPoint, float reach)
+    {
+        if (isStepping || isDigStriking) return;
+        StartCoroutine(SparStrikeCoroutine(targetPos, strikeSpeed, startPoint, reach));
+    }
+
+    IEnumerator SparStrikeCoroutine(Vector2 targetPos, float strikeSpeed, Vector2 startPoint, float reach)
+    {
+        isSparring = true;
+        isSparStriking = true;
+        isPlanted = false;
+        plantedTransform = null;
+        plantedRb = null;
+
+        // Compute the shoulder position for the thrust line
+        Vector2 shoulderWorld = bodyTransform != null
+            ? (Vector2)bodyTransform.TransformPoint(bodyAnchor)
+            : (Vector2)thigh.TransformPoint(shoulderOnThigh);
+
+        // Strike direction: shoulder → mouse, so the shin thrusts like a spear
+        Vector2 strikeDir = (targetPos - shoulderWorld).normalized;
+        // Place the foot PAST the mouse along the thrust line so the shin passes through the target
+        float thrustReach = Mathf.Min(thighLength + shinLength, Vector2.Distance(shoulderWorld, targetPos) + shinLength * 0.5f);
+        Vector2 thrustEndpoint = shoulderWorld + strikeDir * thrustReach;
+
+        // Keep the aim target on the mouse throughout the strike so the shin stays pointed at it
+        sparAimTarget = targetPos;
+
+        Vector2 startPos = currentFootPos;
+        float strikeDist = Vector2.Distance(startPos, thrustEndpoint);
+        
+        // Stabs are much faster than walking steps
+        float strikeTime = strikeDist / Mathf.Max(1f, strikeSpeed);
+        float t = 0f;
+
+        while (t < 1f)
+        {
+            t += Time.deltaTime / Mathf.Max(0.005f, strikeTime);
+            if (t > 1f) t = 1f;
+            
+            // Cubed ease-in for a very explosive "launch" feel
+            float ease = t * t * t; 
+            currentFootPos = Vector2.Lerp(startPos, thrustEndpoint, ease);
+
+            // Keep shin aimed at the mouse throughout the thrust
+            sparAimTarget = targetPos;
+            yield return null;
+        }
+        currentFootPos = thrustEndpoint;
+
+        // Check for physical impact along the thrust line for force transfer
+        RaycastHit2D hit = Physics2D.Raycast(shoulderWorld, strikeDir, thrustReach + 0.2f, controller.attachableLayers);
+        if (hit.collider != null)
+        {
+            var impactRb = hit.collider.GetComponentInParent<Rigidbody2D>();
+            if (impactRb != null && impactRb != controller.headRb)
+            {
+                impactRb.AddForceAtPosition(strikeDir * (controller.headRb.mass * 12f), hit.point, ForceMode2D.Impulse);
+            }
+        }
+
+        // Very brief pause to sell the impact
+        yield return new WaitForSeconds(0.06f);
+
+        // Clear aim target so normal IK resumes during recovery
+        sparAimTarget = Vector2.zero;
+        isSparStriking = false;
     }
 
     // ───────────────────────────────────────────────────────────

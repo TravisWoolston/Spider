@@ -1,4 +1,5 @@
 using UnityEngine;
+using System.Collections;
 using System.Collections.Generic;
 
 public class SpiderControllerIK : MonoBehaviour
@@ -27,6 +28,8 @@ public class SpiderControllerIK : MonoBehaviour
     public Rigidbody2D headRb;
     public float bodySmoothing = 10f;
     public float bodyLead = 2f;
+    public float dynamicBodyLeadRate = 5f;
+    public float dynamicBodyLeadCap = 5f;
     public float bodyHeight = 0f;
     public float defaultBodyHeight = 0f;
     public float bodyHeightMin = -10f;
@@ -43,6 +46,7 @@ public class SpiderControllerIK : MonoBehaviour
     public int kneeRayCount = 40;
     public float sightDistance = 15f;
     public float kneeRayScale = 0.6f;
+    public float dirtDetectionRadius = 1.5f;
 
     [Header("Web Physics")]
     public float spiderWeightMult = 1.0f;
@@ -61,18 +65,25 @@ public class SpiderControllerIK : MonoBehaviour
     public float digRecoveryTime = 0.12f;
     public float digStrikeInterval = 0.2f;
 
+    [Header("Sparring")]
+    public KeyCode strikeKey = KeyCode.Mouse0;
+    public KeyCode sparStanceKey = KeyCode.E;
+    public float sparStrikeSpeed = 180f;
+
     // ── Runtime state ──────────────────────────────────────────
     private float targetBodyHeight = 0f;
     [HideInInspector] public Vector2 inputDirection;
+    [HideInInspector] public float aiHeightInput = 0f;
     private Vector2 smoothedInput;
     private Vector2 currentSurfaceNormal = Vector2.up;
     private float groundFactor = 1.0f;
     private int dirtLayer;
     private int digNextLegIndex = 0;
     private float digCooldownTimer = 0f;
+    private float currentLeadOffset = 0f;
 
-    private List<AttachmentPoint> leftPoints = new();
-    private List<AttachmentPoint> rightPoints = new();
+    public List<AttachmentPoint> leftPoints = new();
+    public List<AttachmentPoint> rightPoints = new();
     private Vector2[] restingFootOffsets;
     private int nextLegIndex;
     private int lastSteppedIndex = -1;
@@ -86,6 +97,14 @@ public class SpiderControllerIK : MonoBehaviour
     private SpiderWebShooter shooter;
     private SpiderLegIK manipulatorLeg;
     private bool isManipulating = false;
+
+    // Sparring stance state
+    private bool isSparStance = false;
+    private SpiderLegIK sparStanceLeft;   // Left-side leg in stance
+    private SpiderLegIK sparStanceRight;  // Right-side leg in stance
+    private SpiderLegIK sparTrackingLeg;  // Whichever stance leg is actively tracking the mouse
+    private SpiderLegIK sparLeg;
+    private bool isSparWindUp = false;
 
     // ───────────────────────────────────────────────────────────
     //  Lifecycle
@@ -181,6 +200,7 @@ public class SpiderControllerIK : MonoBehaviour
             if (leg.isPlanted) leg.plantedTimer += Time.deltaTime;
 
         if (isDigging) HandleDigging();
+        HandleSparring();
         ProcessGait();
         HandleWebManipulation();
 
@@ -242,11 +262,15 @@ public class SpiderControllerIK : MonoBehaviour
                 inputDirection = Vector2.zero;
 
             float heightInput = 0f;
-            if (Input.GetKey(KeyCode.E) || Input.GetKey(KeyCode.LeftShift)) heightInput += 1f;
+            if (Input.GetKey(KeyCode.LeftShift)) heightInput += 1f;
             if (Input.GetKey(KeyCode.Q) || Input.GetKey(KeyCode.LeftControl)) heightInput -= 1f;
             if (Input.GetKeyDown(KeyCode.R)) isDigging = !isDigging;
 
             targetBodyHeight += heightInput * bodyHeightSpeed * Time.deltaTime;
+        }
+        else
+        {
+            targetBodyHeight += aiHeightInput * bodyHeightSpeed * Time.deltaTime;
         }
 
         if (smoothedInput.sqrMagnitude > 0.1f)
@@ -259,6 +283,15 @@ public class SpiderControllerIK : MonoBehaviour
             foreach (var ap in rightPoints)
                 if (Vector2.Dot(ap.point - (Vector2)headT.position, smoothedInput.normalized) > 0.5f) pointsAhead++;
 
+            int steppingLegs = 0;
+            foreach (var leg in legs)
+                if (leg.isStepping) steppingLegs++;
+
+            if (steppingLegs == 0)
+                currentLeadOffset = Mathf.MoveTowards(currentLeadOffset, dynamicBodyLeadCap, dynamicBodyLeadRate * Time.deltaTime);
+            else
+                currentLeadOffset = Mathf.MoveTowards(currentLeadOffset, 0f, dynamicBodyLeadRate * 2f * Time.deltaTime);
+
             if (pointsAhead < 2 && groundFactor < 0.1f)
                 targetBodyHeight = Mathf.Lerp(targetBodyHeight, bodyHeightMin, Time.deltaTime * 3f);
             else
@@ -270,6 +303,34 @@ public class SpiderControllerIK : MonoBehaviour
         }
 
         float clampMin = groundFactor > 0.1f ? 0.2f : bodyHeightMin;
+
+        // --- Dirt Avoidance ---
+        Vector2 origin = headRb != null ? headRb.position : (Vector2)headT.position;
+        Collider2D closestDirt = null;
+        float minDirtDist = float.MaxValue;
+        Vector2 closestPoint = origin;
+        
+        int overlapCount = Physics2D.OverlapCircleNonAlloc(origin, dirtDetectionRadius, overlapBuffer, 1 << dirtLayer);
+        for (int i = 0; i < overlapCount; i++)
+        {
+            Collider2D col = overlapBuffer[i];
+            Vector2 cp = col.ClosestPoint(origin);
+            float dist = Vector2.Distance(origin, cp);
+            if (dist < minDirtDist)
+            {
+                minDirtDist = dist;
+                closestDirt = col;
+                closestPoint = cp;
+            }
+        }
+        
+        if (closestDirt != null && minDirtDist < dirtDetectionRadius && minDirtDist > 0.001f)
+        {
+            Vector2 toHead = (origin - closestPoint).normalized;
+            float dot = Vector2.Dot(toHead, currentSurfaceNormal);
+            float push = (dirtDetectionRadius - minDirtDist);
+            targetBodyHeight += dot * push * Time.deltaTime * 20f;
+        }
 
         // Digging no longer overrides body height — maintain normal posture
 
@@ -321,6 +382,9 @@ public class SpiderControllerIK : MonoBehaviour
 
                     float dist = Vector2.Distance(hit.point, origin);
                     if (hit.collider.gameObject.layer == webLayer && dist < 1.0f)
+                        continue;
+
+                    if (hit.collider.gameObject.layer == dirtLayer && (hit.distance == 0f || Vector2.Dot(dir, hit.normal) > 0f))
                         continue;
 
                     float localX = headT.InverseTransformPoint(hit.point).x;
@@ -375,6 +439,9 @@ public class SpiderControllerIK : MonoBehaviour
                         if (!isWeb && distFromHead < 1.0f)
                             continue;
 
+                        if (hit.collider.gameObject.layer == dirtLayer && (hit.distance == 0f || Vector2.Dot(dir, hit.normal) > 0f))
+                            continue;
+
                         float localX = headT.InverseTransformPoint(hit.point).x;
                         var ap = new AttachmentPoint(hit.point, hit.normal, hit.collider);
                         if (localX < 0) leftPoints.Add(ap);
@@ -421,8 +488,7 @@ public class SpiderControllerIK : MonoBehaviour
 
         if (legs.Length > 0)
         {
-            avgY /= legs.Length;
-            defaultBodyHeight = -avgY;
+            // Respect the defaultBodyHeight set in the editor instead of overwriting it
             targetBodyHeight = defaultBodyHeight;
             bodyHeight = defaultBodyHeight;
         }
@@ -460,7 +526,7 @@ public class SpiderControllerIK : MonoBehaviour
         int detachedL = 0, detachedR = 0;
         foreach (var l in legs)
         {
-            if (l.isStepping || l.isDigStriking || !l.isPlanted)
+            if (l.isStepping || l.isDigStriking || l.isSparring || !l.isPlanted)
             {
                 if (l.isPhysicallyRight) detachedR++;
                 else detachedL++;
@@ -472,7 +538,7 @@ public class SpiderControllerIK : MonoBehaviour
 
         foreach (var leg in legs)
         {
-            if (!leg.isPlanted || leg.isStepping || leg.isDigStriking) continue;
+            if (!leg.isPlanted || leg.isStepping || leg.isDigStriking || leg.isSparring) continue;
 
             if (leg.isPhysicallyRight && detachedR >= Mathf.CeilToInt(maxDetached / 2f)) continue;
             if (!leg.isPhysicallyRight && detachedL >= Mathf.CeilToInt(maxDetached / 2f)) continue;
@@ -563,7 +629,7 @@ public class SpiderControllerIK : MonoBehaviour
             leg.StepTo(best.point, best.normal, best.collider);
     }
 
-    struct AttachmentPoint
+    public struct AttachmentPoint
     {
         public Vector2 point;
         public Vector2 normal;
@@ -598,7 +664,7 @@ public class SpiderControllerIK : MonoBehaviour
         foreach (var ap in pool)
         {
             float distFromHead = Vector2.Distance(headPos, ap.point);
-            bool isWeb = ap.collider.gameObject.layer == webLayer;
+            bool isWeb = ap.collider != null && ap.collider.gameObject.layer == webLayer;
 
             if (distFromHead > legExtensionMax || distFromHead < legExtensionMin) continue;
 
@@ -615,6 +681,9 @@ public class SpiderControllerIK : MonoBehaviour
 
             float localX = headT.InverseTransformPoint(ap.point).x;
             float score = 0f;
+            
+            // Strongly prefer webs since they are player-constructed fast travel / bridges
+            if (isWeb) score += 40f;
 
             score -= Vector2.Distance(idealPos, ap.point) * 2.0f;
 
@@ -704,6 +773,174 @@ public class SpiderControllerIK : MonoBehaviour
     }
 
     // ───────────────────────────────────────────────────────────
+    //  Sparring Routine
+    // ───────────────────────────────────────────────────────────
+
+    void HandleSparring()
+    {
+        if (isAI) return;
+
+        // ── Toggle Stance with E ──
+        if (Input.GetKeyDown(sparStanceKey))
+        {
+            if (!isSparStance)
+                EnterSparStance();
+            else
+                ExitSparStance();
+        }
+
+        if (!isSparStance) return;
+
+        // ── Determine which stance leg should track the mouse ──
+        Vector2 mousePos = GetMouseWorldPos();
+        float targetLocalX = headT.InverseTransformPoint(mousePos).x;
+        bool mouseIsRight = targetLocalX >= 0;
+
+        // The leg on the same side as the mouse tracks it
+        SpiderLegIK desiredTracker = mouseIsRight ? sparStanceRight : sparStanceLeft;
+        if (desiredTracker != null && desiredTracker != sparTrackingLeg)
+        {
+            // Swap tracking: old tracker holds its current arched position
+            sparTrackingLeg = desiredTracker;
+        }
+
+        // ── Update both stance legs ──
+        if (sparStanceLeft != null && !sparStanceLeft.isStepping && !sparStanceLeft.isSparStriking)
+            UpdateStanceLeg(sparStanceLeft, sparStanceLeft == sparTrackingLeg ? mousePos : (Vector2?)null);
+        if (sparStanceRight != null && !sparStanceRight.isStepping && !sparStanceRight.isSparStriking)
+            UpdateStanceLeg(sparStanceRight, sparStanceRight == sparTrackingLeg ? mousePos : (Vector2?)null);
+
+        // ── Click to Strike ──
+        if (Input.GetKeyDown(strikeKey) && sparTrackingLeg != null && !sparTrackingLeg.isStepping && !sparTrackingLeg.isSparStriking)
+        {
+            int idx = System.Array.IndexOf(legs, sparTrackingLeg);
+            Vector2 shoulderWorld = headT.TransformPoint(restingFootOffsets[idx]);
+            sparTrackingLeg.LaunchSparStrike(mousePos, sparStrikeSpeed, shoulderWorld, sparTrackingLeg.thighLength + sparTrackingLeg.shinLength);
+
+            // Immediately swap tracking to the other side
+            sparTrackingLeg = (sparTrackingLeg == sparStanceLeft) ? sparStanceRight : sparStanceLeft;
+        }
+    }
+
+    void EnterSparStance()
+    {
+        isSparStance = true;
+        sparStanceLeft = PickBestStanceLeg(false);
+        sparStanceRight = PickBestStanceLeg(true);
+
+        if (sparStanceLeft != null) LiftLegIntoStance(sparStanceLeft);
+        if (sparStanceRight != null) LiftLegIntoStance(sparStanceRight);
+
+        // Default: track on the side closest to the mouse
+        Vector2 mousePos = GetMouseWorldPos();
+        float localX = headT.InverseTransformPoint(mousePos).x;
+        sparTrackingLeg = localX >= 0 ? sparStanceRight : sparStanceLeft;
+        if (sparTrackingLeg == null)
+            sparTrackingLeg = sparStanceLeft ?? sparStanceRight;
+    }
+
+    void ExitSparStance()
+    {
+        isSparStance = false;
+        if (sparStanceLeft != null && sparStanceLeft.isSparring && !sparStanceLeft.isStepping)
+            ReplantStanceLeg(sparStanceLeft);
+        if (sparStanceRight != null && sparStanceRight.isSparring && !sparStanceRight.isStepping)
+            ReplantStanceLeg(sparStanceRight);
+
+        sparStanceLeft = null;
+        sparStanceRight = null;
+        sparTrackingLeg = null;
+    }
+
+    SpiderLegIK PickBestStanceLeg(bool rightSide)
+    {
+        SpiderLegIK best = null;
+        float bestDist = float.MaxValue;
+        Vector2 headPos = headRb != null ? headRb.position : (Vector2)headT.position;
+
+        for (int i = 0; i < legs.Length; i++)
+        {
+            var leg = legs[i];
+            if (leg.isPhysicallyRight != rightSide) continue;
+            if (leg.isStepping || leg.isDigStriking || leg.isSparring) continue;
+            if (!leg.isPlanted) continue;
+
+            float d = Vector2.Distance(leg.currentFootPos, headPos);
+            if (d < bestDist)
+            {
+                bestDist = d;
+                best = leg;
+            }
+        }
+        return best;
+    }
+
+    void LiftLegIntoStance(SpiderLegIK leg)
+    {
+        leg.isSparring = true;
+        leg.isPlanted = false;
+        leg.plantedTransform = null;
+    }
+
+    void ReplantStanceLeg(SpiderLegIK leg)
+    {
+        // Find a nearby surface to plant the foot
+        int idx = System.Array.IndexOf(legs, leg);
+        Vector2 shoulderWorld = headT.TransformPoint(restingFootOffsets[idx]);
+        float reach = leg.thighLength + leg.shinLength;
+
+        RaycastHit2D hit = Physics2D.Raycast(shoulderWorld, -headT.up, reach, attachableLayers);
+        if (hit.collider != null)
+        {
+            leg.sparAimTarget = Vector2.zero;
+            leg.isSparring = false;
+            leg.StepTo(hit.point, hit.normal, hit.collider);
+        }
+        else
+        {
+            // Fallback: just drop the sparring flag so the gait can reclaim it
+            leg.sparAimTarget = Vector2.zero;
+            leg.isSparring = false;
+            leg.isPlanted = false;
+        }
+    }
+
+    void UpdateStanceLeg(SpiderLegIK leg, Vector2? trackTarget)
+    {
+        int idx = System.Array.IndexOf(legs, leg);
+        if (idx < 0 || restingFootOffsets == null) return;
+
+        Vector2 shoulderWorld = headT.TransformPoint(restingFootOffsets[idx]);
+
+        if (trackTarget.HasValue)
+        {
+            // ── TRACKING LEG: shin aims at mouse, foot cocked back ──
+            Vector2 mousePos = trackTarget.Value;
+            Vector2 dirToMouse = (mousePos - shoulderWorld).normalized;
+
+            // Foot sits behind shoulder along aim line — cocked spear position
+            Vector2 windUpPos = shoulderWorld - dirToMouse * (leg.thighLength * 0.3f);
+            leg.currentFootPos = Vector2.Lerp(leg.currentFootPos, windUpPos, Time.deltaTime * 40f);
+            leg.sparAimTarget = mousePos;
+
+            // Knee bends away from the aim line
+            Vector2 aimPerp = new Vector2(-dirToMouse.y, dirToMouse.x);
+            leg.plantedNormal = aimPerp * (leg.isPhysicallyRight ? -1f : 1f);
+        }
+        else
+        {
+            // ── IDLE STANCE LEG: hold an arched "guard" position above the shoulder ──
+            Vector2 upDir = (Vector2)headT.up;
+            float sideSign = leg.isPhysicallyRight ? 1f : -1f;
+            Vector2 archTarget = shoulderWorld + upDir * (leg.thighLength * 0.5f)
+                               + (Vector2)headT.right * sideSign * (leg.thighLength * 0.3f);
+            leg.currentFootPos = Vector2.Lerp(leg.currentFootPos, archTarget, Time.deltaTime * 20f);
+            leg.sparAimTarget = Vector2.zero;
+            leg.plantedNormal = upDir;
+        }
+    }
+
+    // ───────────────────────────────────────────────────────────
     //  Digging Routine  (Queued Punch System)
     // ───────────────────────────────────────────────────────────
 
@@ -719,20 +956,34 @@ public class SpiderControllerIK : MonoBehaviour
         float mouseDistFromHead = Vector2.Distance(mousePos, headPos);
         if (mouseDistFromHead > legExtensionMax * 1.2f) return;
 
-        // Raycast to find the terrain surface under the mouse cursor.
-        // Chunks are on the same layer as the terrain parent (typically Default),
-        // so attachableLayers should already include them.
-        RaycastHit2D surfaceHit = Physics2D.Raycast(mousePos + Vector2.up * 5f, Vector2.down, 10f, attachableLayers);
+        // Cast a line-of-sight ray from the spider head toward the mouse. This naturally 
+        // finds the nearest valid surface on the terrain, preventing poking holes inside 
+        // the chunk and completely overriding the older vertical drop-ray.
+        Vector2 rayDir = (mousePos - headPos).normalized;
+        int hitCount = Physics2D.RaycastNonAlloc(headPos, rayDir, hitBuffer, legExtensionMax * 1.2f, attachableLayers);
+        
+        RaycastHit2D surfaceHit = default;
+        float minDist = float.MaxValue;
+        int webLayer = LayerMask.NameToLayer("Web");
 
-        // Fallback: raycast from head toward mouse
-        if (surfaceHit.collider == null)
+        for (int i = 0; i < hitCount; i++)
         {
-            Vector2 rayDir = (mousePos - headPos).normalized;
-            surfaceHit = Physics2D.Raycast(headPos, rayDir, mouseDistFromHead + 5f, attachableLayers);
+            var hit = hitBuffer[i];
+            if (hit.collider == null || hit.collider.gameObject.layer == webLayer) continue;
+
+            // Reject internal zero-distance contacts or backfaces
+            if (hit.collider.gameObject.layer == dirtLayer && (hit.distance == 0f || Vector2.Dot(rayDir, hit.normal) > 0f))
+                continue;
+
+            if (hit.distance < minDist)
+            {
+                minDist = hit.distance;
+                surfaceHit = hit;
+            }
         }
 
         if (surfaceHit.collider == null) return;
-
+        
         Vector2 surfacePoint = surfaceHit.point;
         Vector2 surfaceNormal = surfaceHit.normal;
 
@@ -757,7 +1008,7 @@ public class SpiderControllerIK : MonoBehaviour
             var leg = legs[idx];
 
             // Skip legs that are busy
-            if (leg.isStepping || leg.isDigStriking) continue;
+            if (leg.isStepping || leg.isDigStriking || leg.isSparring) continue;
             if (!leg.isPlanted) continue;
 
             // Only same-side legs can dig — prevents cross-body reaching
@@ -821,7 +1072,7 @@ public class SpiderControllerIK : MonoBehaviour
         {
             // Skip digging legs from body pose — they are mid-animation and would
             // drag the body downward/underground
-            if (leg.isDigStriking) continue;
+            if (leg.isDigStriking || leg.isSparring) continue;
             if (!leg.isPlanted) continue;
 
             avgFootPos += leg.currentFootPos;
@@ -883,7 +1134,7 @@ public class SpiderControllerIK : MonoBehaviour
         Vector2 center = (avgFootPos / planted);
         for (int i = 0; i < legs.Length; i++)
         {
-            if (legs[i].isDigStriking) continue;
+            if (legs[i].isDigStriking || legs[i].isSparring) continue;
             if (!legs[i].isPlanted) continue;
             Vector2 relPos = (Vector2)legs[i].currentFootPos - center;
             float localX = restingFootOffsets[i].x;
@@ -951,7 +1202,7 @@ public class SpiderControllerIK : MonoBehaviour
         Vector2 posSum = Vector2.zero;
         for (int i = 0; i < legs.Length; i++)
         {
-            if (legs[i].isDigStriking) continue;
+            if (legs[i].isDigStriking || legs[i].isSparring) continue;
             if (!legs[i].isPlanted) continue;
             Vector2 worldOffset = stableRot * (Vector3)restingFootOffsets[i];
             posSum += (legs[i].currentFootPos - worldOffset);
@@ -1011,7 +1262,7 @@ public class SpiderControllerIK : MonoBehaviour
         // the spider being pushed into the ceiling along a confused avgNormal.
         float coherenceScale = Mathf.Lerp(0.1f, 1.0f, Mathf.Clamp01(normalCoherence * 2f));
         float effectHeight = bodyHeight * Mathf.Lerp(0.2f, 1.0f, confidence) * coherenceScale;
-        float effectLead = bodyLead * Mathf.Lerp(0.4f, 1.0f, confidence);
+        float effectLead = (bodyLead + currentLeadOffset) * Mathf.Lerp(0.4f, 1.0f, confidence);
 
         targetPos += avgNormal * effectHeight;
 
@@ -1025,7 +1276,7 @@ public class SpiderControllerIK : MonoBehaviour
         // Count actively digging legs to dampen body movement during dig cycles.
         int diggingCount = 0;
         foreach (var leg in legs)
-            if (leg.isDigStriking) diggingCount++;
+            if (leg.isDigStriking || leg.isSparring) diggingCount++;
         float digDampen = diggingCount > 0 ? Mathf.Lerp(1f, 0.4f, (float)diggingCount / Mathf.Max(1, legs.Length)) : 1f;
 
         float surfaceSmoothing = Mathf.Lerp(bodySmoothing * 0.7f, bodySmoothing, groundFactor);
@@ -1068,7 +1319,7 @@ public class SpiderControllerIK : MonoBehaviour
     {
         int n = 0;
         foreach (var leg in legs)
-            if (leg.isStepping || leg.isDigStriking || !leg.isPlanted) n++;
+            if (leg.isStepping || leg.isDigStriking || leg.isSparring || !leg.isPlanted) n++;
         return n;
     }
 
@@ -1227,5 +1478,7 @@ public class SpiderControllerIK : MonoBehaviour
         Gizmos.DrawWireSphere(headPos, legExtensionMin);
         Gizmos.color = new Color(1, 0, 0, 0.1f);
         Gizmos.DrawWireSphere(headPos, headSafeArea);
+        Gizmos.color = new Color(0.6f, 0.3f, 0f, 0.2f);
+        Gizmos.DrawWireSphere(headPos, dirtDetectionRadius);
     }
 }

@@ -25,6 +25,9 @@ public class SpiderAI : MonoBehaviour
     public List<Vector2> path = new List<Vector2>();
     private int currentWaypointIndex = 0;
 
+    [Header("Debug")]
+    public bool showDebug = false;
+
     private SpiderControllerIK spiderController;
     private SpiderPathfinding spiderPathfinding;
 
@@ -135,6 +138,27 @@ public class SpiderAI : MonoBehaviour
                 spiderController.inputDirection = (currentGoal - headPos).normalized;
             }
         }
+
+        // 3. Auto-Height Modulator to avoid getting stuck in inner corners or clipping the head
+        if (spiderController.inputDirection.sqrMagnitude > 0.01f)
+        {
+            // Raycast forward to see if the spider's head is about to ram into a surface
+            RaycastHit2D hit = Physics2D.Raycast(headPos, spiderController.inputDirection, spiderController.headSafeArea, spiderController.attachableLayers);
+            if (hit.collider != null && hit.fraction > 0f)
+            {
+                // Push body away dynamically based on how close we are
+                float closeness = 1f - (hit.distance / spiderController.headSafeArea);
+                spiderController.aiHeightInput = closeness * 2.0f; // Scale input up to firmly push away
+            }
+            else
+            {
+                spiderController.aiHeightInput = 0f;
+            }
+        }
+        else
+        {
+            spiderController.aiHeightInput = 0f;
+        }
     }
 
     void PickWanderTarget()
@@ -229,7 +253,8 @@ public class SpiderAI : MonoBehaviour
 
     void OnDrawGizmos()
     {
-        if (GameSetup.Instance == null || !GameSetup.Instance.showAIDebug) return;
+        bool showGlobalDebug = GameSetup.Instance != null && GameSetup.Instance.showAIDebug;
+        if (!showGlobalDebug && !showDebug) return;
 
         if (path != null && path.Count > 0)
         {

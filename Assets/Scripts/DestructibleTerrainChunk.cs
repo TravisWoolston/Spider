@@ -28,6 +28,13 @@ public class DestructibleTerrainChunk : MonoBehaviour
     // Flags to skip unnecessary work on specific chunk types
     private bool skipShadowCaster = false;
     private bool skipCollider = false;
+    private bool suppressShadowVisibility = false;
+
+    /// <summary>
+    /// When true, UpdateShadowCasterVisibility will not force-enable the shadow caster.
+    /// Set by ChunkLODManager when it owns shadow caster enabled/disabled state.
+    /// </summary>
+    public void SetSuppressShadowVisibility(bool suppress) { suppressShadowVisibility = suppress; }
 
     // Cached to avoid per-frame string comparison and GetComponent calls
     private bool isWallChunk = false;
@@ -56,12 +63,24 @@ public class DestructibleTerrainChunk : MonoBehaviour
     private float shadowInset = 0f;
     private PathsD cachedInsetPaths = null;
 
+    // Shadow path simplification: aggressively reduce vertex count on shadow polygons
+    // since shadow shapes don't need collision-level detail.
+    private static float shadowSimplifyTolerance = 0.5f;
+    private static int maxShadowVertices = 32;
+
     // Camera frustum culling for wall shadow casters
     private static Camera cachedCamera;
     private static int cachedCameraFrame = -1;
     private static Plane[] cachedFrustumPlanes = new Plane[6];
     private Bounds chunkWorldBounds;
     private bool boundsInitialized = false;
+
+    // Hysteresis margin for frustum culling to prevent flickering at edges
+    private const float CullingHysteresisMargin = 2f;
+    private bool wasInView = true;
+
+    // Depth offset explicitly applied to rendered mesh vertices (prevents ShadowCaster2D from drifting)
+    private float meshZOffset = 0f;
 
     /// <summary>
     /// Configure this chunk to skip shadow caster creation (e.g. foreground chunks
@@ -74,6 +93,15 @@ public class DestructibleTerrainChunk : MonoBehaviour
         skipCollider = noCollider;
         isWallChunk = noCollider;
         isWallChunkResolved = true;
+    }
+
+    /// <summary>
+    /// Explicitly push the generated mesh vertices into the background for perspective parallax,
+    /// without tearing the shadow caster out from the Z=0 plane.
+    /// </summary>
+    public void SetMeshZOffset(float zOffset)
+    {
+        meshZOffset = zOffset;
     }
 
     /// <summary>
@@ -310,8 +338,16 @@ public class DestructibleTerrainChunk : MonoBehaviour
     private void LateUpdate()
     {
         // One-time init for serialized chunks: seed bounds and recover flags.
+        // Do this early and unconditionally to avoid mid-frame bound changes.
         if (!boundsInitialized)
+        {
             EnsureReady();
+            // Force bounds initialization even if EnsureReady didn't set it
+            if (!boundsInitialized && myPaths != null && myPaths.Count > 0)
+            {
+                chunkWorldBounds = ComputeWorldBoundsFromPaths();
+            }
+        }
 
         if (dirty)
         {
@@ -376,6 +412,15 @@ public class DestructibleTerrainChunk : MonoBehaviour
             PathsD shadowPaths = GetInsetPaths();
             if (shadowPaths == null || shadowPaths.Count == 0) return;
 
+            // Simplify shadow paths aggressively — shadow shapes don't need
+            // the same vertex density as collision or rendering meshes.
+            // This is the single biggest perf win for deep caves with complex geometry.
+            if (shadowSimplifyTolerance > 0f)
+            {
+                shadowPaths = Clipper.SimplifyPaths(shadowPaths, shadowSimplifyTolerance, false);
+                if (shadowPaths == null || shadowPaths.Count == 0) return;
+            }
+
             // Find the largest valid path without allocating a temp list.
             PathD largestPath = null;
             double largestArea = 0;
@@ -387,6 +432,22 @@ public class DestructibleTerrainChunk : MonoBehaviour
             }
 
             if (largestPath == null) return;
+
+            // Further reduce vertex count if still above budget.
+            // Use progressively higher tolerance until we're under the cap.
+            if (largestPath.Count > maxShadowVertices)
+            {
+                float tol = shadowSimplifyTolerance * 2f;
+                for (int attempt = 0; attempt < 4 && largestPath.Count > maxShadowVertices; attempt++)
+                {
+                    var simplified = Clipper.SimplifyPaths(
+                        new PathsD { largestPath }, tol, false);
+                    if (simplified != null && simplified.Count > 0 && simplified[0].Count >= 3)
+                        largestPath = simplified[0];
+                    tol *= 2f;
+                }
+            }
+
             SetShadowPath(sc, largestPath, 0);
         }
         catch { /* Suppress reflection errors on incompatible URP versions */ }
@@ -395,6 +456,17 @@ public class DestructibleTerrainChunk : MonoBehaviour
     private void SetShadowPath(ShadowCaster2D caster, PathD path, int index)
     {
         if (caster == null || path == null || path.Count < 3) return;
+
+        if (!reflectionInitialized)
+        {
+            var type = typeof(ShadowCaster2D);
+            shapePathField = type.GetField("m_ShapePath", BindingFlags.NonPublic | BindingFlags.Instance);
+            shadowCastingSourceField = type.GetField("m_ShadowCastingSource", BindingFlags.NonPublic | BindingFlags.Instance);
+            shapePathHashField = type.GetField("m_ShapePathHash", BindingFlags.NonPublic | BindingFlags.Instance);
+            forceShadowRebuildField = type.GetField("m_ForceShadowMeshRebuild", BindingFlags.NonPublic | BindingFlags.Instance);
+            reflectionInitialized = true;
+        }
+        if (shapePathField == null) return;
 
         if (shadowCastingSourceField != null)
             shadowCastingSourceField.SetValue(caster, System.Enum.ToObject(shadowCastingSourceField.FieldType, 1));
@@ -414,24 +486,187 @@ public class DestructibleTerrainChunk : MonoBehaviour
             shapePathHashField.SetValue(caster, hash);
         if (forceShadowRebuildField != null)
             forceShadowRebuildField.SetValue(caster, true);
+
+        // Turn on Self Shadows (castsShadows) to seamlessly fix URP 2D shadow surface Z-fighting (the flickering) 
+        // when projecting shadows onto the exact same layer as the caster's own MeshRenderer.
+        caster.castsShadows = true;
+    }
+
+    /// <summary>
+    /// Write a simple 4-vertex rectangle shadow shape to a ShadowCaster2D.
+    /// Used by ChunkLODManager as a cheap proxy shadow for distant chunks above
+    /// the player — solid ground blocks all light, so a full rectangle is correct.
+    /// Coordinates are in LOCAL space of the ShadowCaster2D's transform.
+    /// </summary>
+    public static void SetProxyShadowRect(ShadowCaster2D caster, float minX, float minY, float maxX, float maxY)
+    {
+        if (caster == null) return;
+
+        // Ensure reflection is initialized (safe to call multiple times)
+        if (!reflectionInitialized)
+        {
+            var type = typeof(ShadowCaster2D);
+            shapePathField = type.GetField("m_ShapePath", BindingFlags.NonPublic | BindingFlags.Instance);
+            shadowCastingSourceField = type.GetField("m_ShadowCastingSource", BindingFlags.NonPublic | BindingFlags.Instance);
+            shapePathHashField = type.GetField("m_ShapePathHash", BindingFlags.NonPublic | BindingFlags.Instance);
+            forceShadowRebuildField = type.GetField("m_ForceShadowMeshRebuild", BindingFlags.NonPublic | BindingFlags.Instance);
+            reflectionInitialized = true;
+        }
+
+        if (shapePathField == null) return;
+
+        try
+        {
+            if (shadowCastingSourceField != null)
+                shadowCastingSourceField.SetValue(caster, System.Enum.ToObject(shadowCastingSourceField.FieldType, 1));
+
+            Vector3[] pts = new Vector3[4]
+            {
+                new Vector3(minX, minY, 0f),
+                new Vector3(maxX, minY, 0f),
+                new Vector3(maxX, maxY, 0f),
+                new Vector3(minX, maxY, 0f),
+            };
+
+            int hash = minX.GetHashCode() ^ minY.GetHashCode() ^ maxX.GetHashCode() ^ maxY.GetHashCode();
+            hash ^= 0x50524F58; // "PROX" marker
+
+            shapePathField.SetValue(caster, pts);
+            if (shapePathHashField != null)
+                shapePathHashField.SetValue(caster, hash);
+            if (forceShadowRebuildField != null)
+                forceShadowRebuildField.SetValue(caster, true);
+
+            caster.castsShadows = true;
+        }
+        catch { /* Suppress reflection errors */ }
+    }
+
+    /// <summary>
+    /// Blend the shadow shape between the real detailed cave outline (t=0) and
+    /// a solid chunk rectangle (t=1). Uses Clipper.InflatePaths to progressively
+    /// seal cave openings as t increases, creating an organic "fog of war" reveal.
+    /// Small features seal first, large caverns last.
+    /// </summary>
+    public void SetBlendedShadow(float t, float chunkMinX, float chunkMinY, float chunkMaxX, float chunkMaxY)
+    {
+        if (cachedShadowCaster == null) cachedShadowCaster = GetComponent<ShadowCaster2D>();
+        if (cachedShadowCaster == null) return;
+
+        // Endpoints: use fast-path methods
+        if (t <= 0.01f)
+        {
+            SyncShadowCaster();
+            return;
+        }
+        if (t >= 0.99f)
+        {
+            SetProxyShadowRect(cachedShadowCaster, chunkMinX, chunkMinY, chunkMaxX, chunkMaxY);
+            return;
+        }
+
+        PathsD sourcePaths = GetInsetPaths();
+        if (sourcePaths == null || sourcePaths.Count == 0)
+        {
+            SetProxyShadowRect(cachedShadowCaster, chunkMinX, chunkMinY, chunkMaxX, chunkMaxY);
+            return;
+        }
+
+        // Inflate the terrain paths outward to fill caves.
+        // Max inflate = half the chunk diagonal, which guarantees full coverage.
+        float chunkW = chunkMaxX - chunkMinX;
+        float chunkH = chunkMaxY - chunkMinY;
+        float maxInflate = Mathf.Sqrt(chunkW * chunkW + chunkH * chunkH) * 0.5f;
+
+        // Use an ease-in curve so small features close first, big caverns stay longer
+        float easedT = t * t;
+        float inflateAmount = easedT * maxInflate;
+
+        PathsD inflated = Clipper.InflatePaths(sourcePaths, inflateAmount,
+            Clipper2Lib.JoinType.Round, Clipper2Lib.EndType.Polygon, 2, 2);
+
+        if (inflated == null || inflated.Count == 0)
+        {
+            SetProxyShadowRect(cachedShadowCaster, chunkMinX, chunkMinY, chunkMaxX, chunkMaxY);
+            return;
+        }
+
+        // Clip to chunk bounds so the inflated shape doesn't bleed into neighbors
+        PathD chunkRect = new PathD(4);
+        chunkRect.Add(new PointD(chunkMinX, chunkMinY));
+        chunkRect.Add(new PointD(chunkMaxX, chunkMinY));
+        chunkRect.Add(new PointD(chunkMaxX, chunkMaxY));
+        chunkRect.Add(new PointD(chunkMinX, chunkMaxY));
+
+        PathsD clipped = Clipper.Intersect(inflated, new PathsD { chunkRect },
+            FillRule.NonZero, 2);
+
+        if (clipped == null || clipped.Count == 0)
+        {
+            SetProxyShadowRect(cachedShadowCaster, chunkMinX, chunkMinY, chunkMaxX, chunkMaxY);
+            return;
+        }
+
+        // Simplify the blended shape for performance
+        clipped = Clipper.SimplifyPaths(clipped, shadowSimplifyTolerance, false);
+
+        // Find the largest path
+        PathD largestPath = null;
+        double largestArea = 0;
+        foreach (var p in clipped)
+        {
+            if (p == null || p.Count < 3) continue;
+            double a = System.Math.Abs(Clipper.Area(p));
+            if (a > largestArea) { largestArea = a; largestPath = p; }
+        }
+
+        if (largestPath == null)
+        {
+            SetProxyShadowRect(cachedShadowCaster, chunkMinX, chunkMinY, chunkMaxX, chunkMaxY);
+            return;
+        }
+
+        // Cap vertices
+        if (largestPath.Count > maxShadowVertices)
+        {
+            float tol = shadowSimplifyTolerance * 2f;
+            for (int attempt = 0; attempt < 4 && largestPath.Count > maxShadowVertices; attempt++)
+            {
+                var simplified = Clipper.SimplifyPaths(
+                    new PathsD { largestPath }, tol, false);
+                if (simplified != null && simplified.Count > 0 && simplified[0].Count >= 3)
+                    largestPath = simplified[0];
+                tol *= 2f;
+            }
+        }
+
+        SetShadowPath(cachedShadowCaster, largestPath, 0);
+    }
+
+    /// <summary>
+    /// Force-restore the real detailed shadow path from myPaths.
+    /// Called by ChunkLODManager when a chunk transitions back from proxy/blended shadows.
+    /// </summary>
+    public void ForceSyncShadow()
+    {
+        SyncShadowCaster();
     }
 
     private void UpdateShadowCasterVisibility()
     {
+        if (suppressShadowVisibility) return;
+
         if (cachedShadowCaster == null) cachedShadowCaster = GetComponent<ShadowCaster2D>();
         var sc = cachedShadowCaster;
         if (sc == null) return;
 
-        bool shouldEnable = IsChunkInView();
-
-        if (sc.enabled != shouldEnable)
+        // BYPASS: Frustum culling ShadowCaster2Ds breaks directional lighting, 
+        // because an off-screen chunk's shadow could be reaching deep into the visible screen.
+        // URP 2D relies on its own internal light-bounded culling trees which are extremely fast.
+        if (sc.enabled != true)
         {
-            sc.enabled = shouldEnable;
-            if (shouldEnable)
-            {
-                // When becoming visible again, force one sync so the shadow is current.
-                SyncShadowCaster();
-            }
+            sc.enabled = true;
+            SyncShadowCaster();
         }
     }
 
@@ -450,9 +685,13 @@ public class DestructibleTerrainChunk : MonoBehaviour
         if (cachedCamera == null) return true;
 
         // Expand bounds to account for shadow reach beyond the visible mesh.
+        // Use hysteresis: larger margin when currently visible to prevent flickering.
+        float margin = shadowInset + 5f + (wasInView ? CullingHysteresisMargin : 0f);
         Bounds padded = chunkWorldBounds;
-        padded.Expand(shadowInset + 5f);
-        return GeometryUtility.TestPlanesAABB(cachedFrustumPlanes, padded);
+        padded.Expand(margin);
+        bool inView = GeometryUtility.TestPlanesAABB(cachedFrustumPlanes, padded);
+        wasInView = inView;
+        return inView;
     }
 
     private Bounds ComputeWorldBoundsFromPaths()
@@ -554,7 +793,7 @@ public class DestructibleTerrainChunk : MonoBehaviour
 
                 float px = (float)tri[vIdx].x;
                 float py = (float)tri[vIdx].y;
-                vertices[idx] = new Vector3(px, py, 0);
+                vertices[idx] = new Vector3(px, py, meshZOffset);
                 uvs[idx] = new Vector2(px * 0.2f, py * 0.2f);
                 indices[idx] = idx;
                 colors[idx] = terrainColor;

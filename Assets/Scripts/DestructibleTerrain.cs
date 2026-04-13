@@ -155,10 +155,15 @@ public class DestructibleTerrain : MonoBehaviour
                                 wallGO.layer = LayerMask.NameToLayer(wallPhysicsLayer);
                                 wallTrans = wallGO.transform;
                             }
-                            wallTrans.localPosition = new Vector3(0, 0, wallZOffset);
+                            // Keep the Wall Game Object exactly at Z=0 so its ShadowCaster2D doesn't slide with Camera Parallax
+                            wallTrans.localPosition = Vector3.zero;
 
                             var wallChunk = wallTrans.GetComponent<DestructibleTerrainChunk>();
                             if (!wallChunk) wallChunk = wallTrans.gameObject.AddComponent<DestructibleTerrainChunk>();
+                            
+                            // Let the chunk know to manually push its mesh vertices back into the distance for the visual parallax effect
+                            wallChunk.SetMeshZOffset(wallZOffset);
+                            
                             wallChunk.SetSkipFlags(noShadowCaster: false, noCollider: true);
                             // shadowInset=0: wall receives pre-inset paths, no per-chunk re-inset.
                             wallChunk.SetShadowInset(0f);
@@ -197,6 +202,10 @@ public class DestructibleTerrain : MonoBehaviour
         // Disable the parent's own PolygonCollider2D (if any) — chunks now own collision.
         var parentCol = GetComponent<PolygonCollider2D>();
         if (parentCol != null) parentCol.enabled = false;
+
+        // Notify the LOD manager that chunks have been rebuilt.
+        var lodManager = GetComponent<ChunkLODManager>();
+        if (lodManager != null) lodManager.OnTerrainRegenerated();
     }
 
     /// <summary>
@@ -323,6 +332,10 @@ public class DestructibleTerrain : MonoBehaviour
                 var key = new Vector2Int(x, y);
                 if (chunks.TryGetValue(key, out var chunk))
                 {
+                    // Force-activate chunks that the LOD manager may have disabled
+                    if (!chunk.gameObject.activeSelf)
+                        chunk.gameObject.SetActive(true);
+
                     chunk.MineHole(localPos, radius, circleSegments, minFragmentArea);
                     affectedChunks.Add((key, chunk));
                 }
@@ -375,6 +388,10 @@ public class DestructibleTerrain : MonoBehaviour
                 chunk.SetWallPaths(wallPaths);
             }
         }
+
+        // Notify the LOD manager to invalidate skylight cache for affected chunks
+        var lodManager = GetComponent<ChunkLODManager>();
+        if (lodManager != null) lodManager.OnChunksDug(worldPos, radius);
     }
 
     private void OnDrawGizmosSelected()

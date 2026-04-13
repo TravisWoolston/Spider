@@ -39,7 +39,12 @@ public class SpiderPathfinding : MonoBehaviour
         // We use a slight reach buffer to ensure the spider can actually make the strides
         float reach = spiderController.legExtensionMax * 0.9f;
 
-        Node startNode = new Node(startPosition, null, 0, Vector2.Distance(startPosition, targetPosition));
+        // Get initial normal from controller to start the path
+        Vector2 startNormal = Vector2.up;
+        if (spiderController.leftPoints.Count > 0) startNormal = spiderController.leftPoints[0].normal;
+        else if (spiderController.rightPoints.Count > 0) startNormal = spiderController.rightPoints[0].normal;
+
+        Node startNode = new Node(startPosition, startNormal, null, 0, Vector2.Distance(startPosition, targetPosition));
         openList.Add(startNode);
 
         int iterations = 0;
@@ -69,8 +74,24 @@ public class SpiderPathfinding : MonoBehaviour
             openList.RemoveAt(bestIdx);
             closedSet.Add(currentNode.Position);
 
-            // 4. Neighbor Expansion using GlobalAttachmentManager
+            // 4. Neighbor Expansion using GlobalAttachmentManager AND Local Raycasts
             List<GlobalAttachmentPoint> pointsNear = GlobalAttachmentManager.GetPointsInRange(currentNode.Position, reach);
+            
+            // Dynamically explore local colliders via raycasts to navigate generated or destructible terrain
+            int angleSteps = 8;
+            Vector2 rayOrigin = currentNode.Position + currentNode.Normal * 0.5f;
+            for (int i = 0; i < angleSteps; i++)
+            {
+                float angle = i * (360f / angleSteps) * Mathf.Deg2Rad;
+                Vector2 dir = new Vector2(Mathf.Cos(angle), Mathf.Sin(angle));
+                
+                // Raycast slightly offset from surface to correctly hit the floor around curves and ledges
+                RaycastHit2D hit = Physics2D.Raycast(rayOrigin, dir, reach + 0.5f, spiderController.attachableLayers);
+                if (hit.collider != null && hit.fraction > 0f)
+                {
+                    pointsNear.Add(new GlobalAttachmentPoint(hit.point, hit.normal, null));
+                }
+            }
             
             foreach (var point in pointsNear)
             {
@@ -103,7 +124,7 @@ public class SpiderPathfinding : MonoBehaviour
                 }
                 else
                 {
-                    openList.Add(new Node(point.Position, currentNode, gCost, hCost));
+                    openList.Add(new Node(point.Position, point.normal, currentNode, gCost, hCost));
                 }
             }
         }
@@ -127,14 +148,16 @@ public class SpiderPathfinding : MonoBehaviour
     private class Node
     {
         public Vector2 Position;
+        public Vector2 Normal;
         public Node Parent;
         public float G;
         public float H;
         public float F => G + H;
 
-        public Node(Vector2 pos, Node parent, float g, float h)
+        public Node(Vector2 pos, Vector2 normal, Node parent, float g, float h)
         {
             Position = pos;
+            Normal = normal;
             Parent = parent;
             G = g;
             H = h;

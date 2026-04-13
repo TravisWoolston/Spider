@@ -85,6 +85,12 @@ public class CentipedeIK : MonoBehaviour
     [Tooltip("Maximum bend allowed between any two body segments (degrees, default 40)")]
     public float maxSegmentBend = 40f;
 
+    [Header("Head Digging")]
+    public bool headDigging = false;
+    public float headDigRadius = 1.5f;
+    [Tooltip("Minimum interval between head digs (seconds)")]
+    public float headDigInterval = 0.15f;
+
     [Header("Debug")]
     public bool showDebug = true;
 
@@ -104,6 +110,13 @@ public class CentipedeIK : MonoBehaviour
     private int lastSteppedIndex = -1;
     private float metachronalPhase; // Decoupled phase for gait rhythm
     private float stickInfluence; // Smoothed blender for steering vs sprawl
+    private Vector2 smoothedAvgNormal = Vector2.up; // Low-pass filtered surface normal
+    private bool symmetryLock; // Hysteresis: true = using altAngle, false = using targetAngle
+
+    // Head digging runtime state
+    private int dirtLayer;
+    private float headDigCooldownTimer = 0f;
+    private ContactPoint2D[] headContactBuffer = new ContactPoint2D[8];
 
     // Zero-allocation buffers for physics queries
     private RaycastHit2D[] hitBuffer = new RaycastHit2D[100];
@@ -117,6 +130,11 @@ public class CentipedeIK : MonoBehaviour
     private Vector2[] segmentFrontAnchors;
     private Vector2[] segmentBackAnchors;
     private Dictionary<Collider2D, int> strandCounts = new();
+    private Dictionary<CentipedeLegIK, int> legIndexLookup;
+    private Rigidbody2D[] segmentRbCache;
+    private Dictionary<Transform, int> segmentIndexLookup;
+    private List<Vector2> raycastOrigins = new();
+    private HashSet<Rigidbody2D> processedSegments = new();
 
     // ───────────────────────────────────────────────────────────
     //  Lifecycle
@@ -150,6 +168,9 @@ public class CentipedeIK : MonoBehaviour
         {
             Physics2D.IgnoreLayerCollision(gameObject.layer, webLayer, true);
         }
+
+        // Cache Dirt layer index for head digging
+        dirtLayer = LayerMask.NameToLayer("Dirt");
 
         // Basic initialization required for both Player and AI
         headT = headRb != null ? headRb.transform : transform;
@@ -223,7 +244,10 @@ public class CentipedeIK : MonoBehaviour
         {
             headRb.bodyType = RigidbodyType2D.Dynamic;
             headRb.gravityScale = 1f;
-            headRb.freezeRotation = true;
+            // Don't freeze rotation — MoveRotation in SolveBodyPose handles orientation,
+            // while allowing the physics engine to resolve collision overlaps naturally.
+            headRb.freezeRotation = false;
+            headRb.angularDamping = 5f; // Moderate damping — PD torque controller handles the rest
         }
 
         // Force include Default and Web layers if they aren't set
@@ -249,6 +273,26 @@ public class CentipedeIK : MonoBehaviour
         }
 
         CaptureRestingPose();
+
+        // Build leg index lookup to eliminate Array.IndexOf calls
+        legIndexLookup = new Dictionary<CentipedeLegIK, int>(legs.Length);
+        for (int i = 0; i < legs.Length; i++)
+            legIndexLookup[legs[i]] = i;
+
+        // Cache segment Rigidbody2D references and index lookup
+        if (bodySegments != null)
+        {
+            segmentRbCache = new Rigidbody2D[bodySegments.Length];
+            segmentIndexLookup = new Dictionary<Transform, int>(bodySegments.Length);
+            for (int i = 0; i < bodySegments.Length; i++)
+            {
+                if (bodySegments[i] != null)
+                {
+                    segmentRbCache[i] = bodySegments[i].GetComponent<Rigidbody2D>();
+                    segmentIndexLookup[bodySegments[i]] = i;
+                }
+            }
+        }
 
         foreach (var leg in legs)
             leg.Solve();
@@ -372,6 +416,8 @@ public class CentipedeIK : MonoBehaviour
         UpdateSteering();
         ProcessGait();
         PerformRaycasts();
+
+        if (headDigging) HandleHeadDigging();
 
         // Update segments before body pose so the legs have accurate local origins
         if (!usePhysicsSegments)
@@ -532,6 +578,36 @@ public class CentipedeIK : MonoBehaviour
     }
 
     // ───────────────────────────────────────────────────────────
+    //  Head Digging
+    // ───────────────────────────────────────────────────────────
+
+    void HandleHeadDigging()
+    {
+        if (headRb == null || dirtLayer < 0) return;
+
+        headDigCooldownTimer -= Time.fixedDeltaTime;
+        if (headDigCooldownTimer > 0f) return;
+
+        // Query contact points between the head rigidbody and any touching colliders
+        int contactCount = headRb.GetContacts(headContactBuffer);
+        for (int i = 0; i < contactCount; i++)
+        {
+            var contact = headContactBuffer[i];
+            if (contact.collider == null) continue;
+            if (contact.collider.gameObject.layer != dirtLayer) continue;
+
+            // Found a Dirt layer contact — mine at the contact point
+            var terrain = contact.collider.GetComponentInParent<DestructibleTerrain>();
+            if (terrain != null)
+            {
+                terrain.MineHole(contact.point, headDigRadius);
+                headDigCooldownTimer = headDigInterval;
+                return; // One dig per interval
+            }
+        }
+    }
+
+    // ───────────────────────────────────────────────────────────
     //  Input
     // ───────────────────────────────────────────────────────────
 
@@ -584,7 +660,7 @@ public class CentipedeIK : MonoBehaviour
         attachmentPoints.Clear();
         int webLayer = LayerMask.NameToLayer("Web");
 
-        List<Vector2> raycastOrigins = new List<Vector2>();
+        raycastOrigins.Clear();
         raycastOrigins.Add(headRb != null ? headRb.position : (Vector2)headT.position);
         if (bodySegments != null)
         {
@@ -742,19 +818,19 @@ public class CentipedeIK : MonoBehaviour
         // 2. RECOVERY: Detached/Tucked legs MUST seek a surface
         // STAGGERED RECOVERY: We only allow a leg to replant if its 'wave' is in the favorable phase.
         // This ensures the centipede lands in the correct order instead of all-at-once.
-        foreach (var leg in legs)
+        for (int li = 0; li < legs.Length; li++)
         {
+            var leg = legs[li];
             if (leg.isStepping || leg.isPlanted) continue;
             
-            int idx = System.Array.IndexOf(legs, leg);
-            float waveOffset = (float)idx * 0.5f; 
+            float waveOffset = (float)li * 0.5f; 
             float wave = Mathf.Sin(metachronalPhase - waveOffset);
 
             // Staggered replant: must be in the leading half of its specific wave (relaxed threshold)
             if (wave > -0.3f && HasValidTarget(leg, true)) 
             {
                 StepLeg(leg, true);
-                lastSteppedIndex = idx;
+                lastSteppedIndex = li;
             }
         }
 
@@ -765,8 +841,9 @@ public class CentipedeIK : MonoBehaviour
     void UrgencyGait()
     {
         // 1. Emergency Check: Over-extended legs MUST step regardless of gait constraints
-        foreach (var leg in legs)
+        for (int li = 0; li < legs.Length; li++)
         {
+            var leg = legs[li];
             if (leg.isStepping) continue;
             
             // EMERGENCY: Stretched past limit (detached legs handled in ProcessGait)
@@ -775,7 +852,7 @@ public class CentipedeIK : MonoBehaviour
                 if (HasValidTarget(leg, false)) 
                 {
                     StepLeg(leg, false);
-                    lastSteppedIndex = System.Array.IndexOf(legs, leg);
+                    lastSteppedIndex = li;
                     return; 
                 }
             }
@@ -785,9 +862,11 @@ public class CentipedeIK : MonoBehaviour
 
         CentipedeLegIK best = null;
         float maxUrg = 1f;
+        int bestIdx = -1;
 
-        foreach (var leg in legs)
+        for (int li = 0; li < legs.Length; li++)
         {
+            var leg = legs[li];
             if (!leg.isPlanted || leg.isStepping) continue;
 
             float u = Urgency(leg);
@@ -796,14 +875,15 @@ public class CentipedeIK : MonoBehaviour
                 if (HasValidTarget(leg, false))
                 {
                     maxUrg = u; 
-                    best = leg; 
+                    best = leg;
+                    bestIdx = li;
                 }
             }
         }
 
         if (best != null) 
         {
-            lastSteppedIndex = System.Array.IndexOf(legs, best);
+            lastSteppedIndex = bestIdx;
             StepLeg(best);
         }
     }
@@ -822,7 +902,7 @@ public class CentipedeIK : MonoBehaviour
 
     float Urgency(CentipedeLegIK leg)
     {
-        int idx = System.Array.IndexOf(legs, leg);
+        int idx = GetLegIndex(leg);
         if (idx < 0 || restingFootOffsets == null) return 0f;
 
         // OPPORTUNISTIC: If not planted, urgency is always maxed until we find a home
@@ -838,8 +918,9 @@ public class CentipedeIK : MonoBehaviour
         float distFromIdeal = Vector2.Distance(leg.currentFootPos, idealPos);
         float idealUrgency = distFromIdeal / (maxReach * 0.7f);
 
-        float ext = leg.GetExtension() / legExtensionMax;
-        float minExt = leg.GetExtension() / legExtensionMin;
+        float extension = leg.GetExtension();
+        float ext = extension / legExtensionMax;
+        float minExt = extension / legExtensionMin;
         float extensionUrgency = (ext > 0.9f) ? (ext - 0.9f) * 10f : 0f;
         if (minExt < 1.1f) extensionUrgency += (1.1f - minExt) * 2f;
 
@@ -851,7 +932,7 @@ public class CentipedeIK : MonoBehaviour
         
         if (lastSteppedIndex != -1)
         {
-            rhythmUrgency *= (legs[lastSteppedIndex] == leg) ? 0.2f : 1.0f;
+            rhythmUrgency *= (lastSteppedIndex == idx) ? 0.2f : 1.0f;
         }
 
         // Only have high positional urgency if we can actually take a significant stride
@@ -859,10 +940,9 @@ public class CentipedeIK : MonoBehaviour
 
         // 6. Proximity Urgency (Avoid legs bunching up)
         float proximityUrgency = 0f;
-        int myIdx = System.Array.IndexOf(legs, leg);
         int range = 3;
-        int start = Mathf.Max(0, myIdx - range);
-        int end = Mathf.Min(legs.Length, myIdx + range + 1);
+        int start = Mathf.Max(0, idx - range);
+        int end = Mathf.Min(legs.Length, idx + range + 1);
 
         for (int i = start; i < end; i++)
         {
@@ -899,7 +979,7 @@ public class CentipedeIK : MonoBehaviour
     AttachmentPoint GetBestPoint(CentipedeLegIK leg, bool isRecovery = false)
     {
         int webLayer = LayerMask.NameToLayer("Web");
-        int idx = System.Array.IndexOf(legs, leg);
+        int idx = GetLegIndex(leg);
         if (attachmentPoints.Count == 0) return new AttachmentPoint { isValid = false };
 
         Transform segment = leg.bodyTransform != null ? leg.bodyTransform : headT;
@@ -1024,7 +1104,7 @@ public class CentipedeIK : MonoBehaviour
 
     bool IsPointTooCloseToOtherFeet(Vector2 point, CentipedeLegIK excludeLeg)
     {
-        int myIdx = System.Array.IndexOf(legs, excludeLeg);
+        int myIdx = GetLegIndex(excludeLeg);
         // Only check neighboring legs for centipede performance
         int range = 3; 
         int start = Mathf.Max(0, myIdx - range);
@@ -1050,15 +1130,18 @@ public class CentipedeIK : MonoBehaviour
 
         // userLiftInput is the degree to which we are pushing AWAY from the current surface normal.
         // This makes the 'raise' logic orientation-agnostic (works on walls/ceilings).
-        float userLiftInput = Mathf.Clamp01(Vector2.Dot(smoothedInput.normalized, currentSurfaceNormal));
+        float userLiftInput = smoothedInput.sqrMagnitude > 0.01f
+            ? Mathf.Clamp01(Vector2.Dot(smoothedInput.normalized, currentSurfaceNormal))
+            : 0f;
 
         // 0. Synchronize all legs and calculate local grip context
         int currentPlanted = 0;
         foreach (var leg in legs) if (leg.isPlanted) currentPlanted++;
         int safetyAnchorCount = Mathf.Max(1, (int)(legs.Length * 0.1f)); 
 
-        foreach (var leg in legs) 
+        for (int legIdx = 0; legIdx < legs.Length; legIdx++) 
         {
+            var leg = legs[legIdx];
             leg.SyncToSurface();
 
             // FORCE DETACH: If a foot is stretched too far, it MUST lose grip.
@@ -1069,7 +1152,6 @@ public class CentipedeIK : MonoBehaviour
             // SOFT METACHRONAL PEELING: Instead of a hard block, we increase the peel threshold 
             // of rear legs if their predecessors are still planted. This maintains the front-to-back
             // preference without 'jamming' the movement if a head-ward leg is stuck.
-            int legIdx = System.Array.IndexOf(legs, leg);
             float peelMultiplier = 1.0f;
             if (legIdx > 0 && userLiftInput > 0.1f)
             {
@@ -1207,11 +1289,27 @@ public class CentipedeIK : MonoBehaviour
         }
         float strandFactor = (float)maxOnSameStrand / Mathf.Max(1, planted);
 
-        Vector2 avgNormal;
+        Vector2 rawAvgNormal;
         if (normalSum.sqrMagnitude < 0.01f)
-            avgNormal = (Vector2)headT.up;
+            rawAvgNormal = (Vector2)headT.up;
         else
-            avgNormal = normalSum.normalized;
+            rawAvgNormal = normalSum.normalized;
+
+        // Low-pass filter the surface normal to prevent frame-to-frame jitter
+        // from rough/procedural terrain normals causing head oscillation.
+        float normalSmoothRate = 8f; // Higher = faster tracking, lower = smoother
+        smoothedAvgNormal = Vector2.Lerp(smoothedAvgNormal, rawAvgNormal, Time.fixedDeltaTime * normalSmoothRate).normalized;
+        Vector2 avgNormal = smoothedAvgNormal;
+
+        // Track whether the fallback (body legs) was used for the influence group.
+        // If head legs are planted, only head legs contributed to avgFootPos.
+        // If not, the fallback block added body legs — those are the ones we want.
+        bool usedFallback = (totalHeadLegs == 0 || planted > 0) && totalPlanted > 0;
+        bool headLegsPlanted = false;
+        for (int i = 0; i < legs.Length; i++)
+        {
+            if (legs[i].bodyTransform == headT && legs[i].isPlanted) { headLegsPlanted = true; break; }
+        }
 
         // 2. Determine "Stable Frame" (Shortest-path rotation for a vertically symmetrical spider)
         // Derived from foot locations to ensure the body "squares up" to its sprawl.
@@ -1222,16 +1320,10 @@ public class CentipedeIK : MonoBehaviour
             if (i >= legs.Length) break;
             var leg = legs[i];
             
-            // Only legs that contributed to the average
-            if (leg.bodyTransform != headT && planted > 0)
-            {
-                // check if we used fallback
-                bool usedInAvg = false;
-                for(int k=0; k<Mathf.Min(legs.Length, 12); k++){
-                    if(legs[k].isPlanted) { usedInAvg = true; break; }
-                }
-                if (!usedInAvg) continue;
-            }
+            // Only include legs that actually contributed to avgFootPos:
+            // - If head legs are planted, only head legs were used
+            // - If head legs aren't planted, fallback body legs were used
+            if (headLegsPlanted && leg.bodyTransform != headT) continue;
 
             if (!leg.isPlanted) continue;
             
@@ -1250,31 +1342,56 @@ public class CentipedeIK : MonoBehaviour
         {
             targetAngle = Mathf.Atan2(num, den) * Mathf.Rad2Deg;
             
-            // 180-degree symmetry management: pick shortest path 
-            // but bias towards surface normal if on solid ground.
+            // 180-degree symmetry management with hysteresis to prevent flip-flop.
+            // Once a side is chosen, require a significantly larger delta to switch,
+            // preventing oscillation when normals jitter near the decision boundary.
             float altAngle = targetAngle + 180f;
             float currentAngle = headT.rotation.eulerAngles.z;
             
             float diff1 = Mathf.Abs(Mathf.DeltaAngle(currentAngle, targetAngle));
             float diff2 = Mathf.Abs(Mathf.DeltaAngle(currentAngle, altAngle));
 
+            bool preferAlt;
             if (groundFactor > 0.3f)
             {
                 float normAngle = Mathf.Atan2(avgNormal.y, avgNormal.x) * Mathf.Rad2Deg - 90f;
-                if (Mathf.Abs(Mathf.DeltaAngle(normAngle, altAngle)) < Mathf.Abs(Mathf.DeltaAngle(normAngle, targetAngle)))
-                    targetAngle = altAngle;
+                preferAlt = Mathf.Abs(Mathf.DeltaAngle(normAngle, altAngle)) < Mathf.Abs(Mathf.DeltaAngle(normAngle, targetAngle));
             }
-            else if (diff2 < diff1)
+            else
             {
-                targetAngle = altAngle;
+                preferAlt = diff2 < diff1;
             }
+
+            // Hysteresis: only flip the symmetry lock if the new choice is clearly better (15° margin)
+            float hysteresisMargin = 15f;
+            if (preferAlt && !symmetryLock)
+            {
+                // Want to switch to alt — require it to be clearly better
+                float advantage = groundFactor > 0.3f
+                    ? Mathf.Abs(Mathf.DeltaAngle(Mathf.Atan2(avgNormal.y, avgNormal.x) * Mathf.Rad2Deg - 90f, targetAngle))
+                    - Mathf.Abs(Mathf.DeltaAngle(Mathf.Atan2(avgNormal.y, avgNormal.x) * Mathf.Rad2Deg - 90f, altAngle))
+                    : diff1 - diff2;
+                if (advantage > hysteresisMargin) symmetryLock = true;
+            }
+            else if (!preferAlt && symmetryLock)
+            {
+                float advantage = groundFactor > 0.3f
+                    ? Mathf.Abs(Mathf.DeltaAngle(Mathf.Atan2(avgNormal.y, avgNormal.x) * Mathf.Rad2Deg - 90f, altAngle))
+                    - Mathf.Abs(Mathf.DeltaAngle(Mathf.Atan2(avgNormal.y, avgNormal.x) * Mathf.Rad2Deg - 90f, targetAngle))
+                    : diff2 - diff1;
+                if (advantage > hysteresisMargin) symmetryLock = false;
+            }
+
+            if (symmetryLock) targetAngle = altAngle;
 
             // --- FRONT-FOOT NORMAL ALIGNMENT ---
             // Reduced surface bias to allow 'airplane' orientation in flight.
             float surfaceAlignmentAngle = Mathf.Atan2(avgNormal.y, avgNormal.x) * Mathf.Rad2Deg - 90f;
             
             // Further reduce bias when steering away from the surface
-            float steeringAway = 1.0f - Mathf.Clamp01(Vector2.Dot(smoothedInput.normalized, avgNormal));
+            float steeringAway = smoothedInput.sqrMagnitude > 0.01f
+                ? 1.0f - Mathf.Clamp01(Vector2.Dot(smoothedInput.normalized, avgNormal))
+                : 0f;
             
             // INCREASED reaching sensitivity: when user moves away from surface, bias significantly towards their stick
             // Further reduced bias (0.01 - 0.2) to prevent the head from 'snapping' parallel to the wall during a reach.
@@ -1287,7 +1404,7 @@ public class CentipedeIK : MonoBehaviour
             float targetInfluence = (smoothedInput.sqrMagnitude > 0.01f) ? 1.0f : 0.0f;
             stickInfluence = Mathf.MoveTowards(stickInfluence, targetInfluence, Time.fixedDeltaTime * 4.0f); // 0.25s transition
 
-            if (stickInfluence > 0.001f)
+            if (stickInfluence > 0.001f && smoothedInput.sqrMagnitude > 0.01f)
             {
                 // WORLD SPACE INPUT: (Right=0, Up=90)
                 float rawInputAngle = Mathf.Atan2(smoothedInput.y, smoothedInput.x) * Mathf.Rad2Deg;
@@ -1326,7 +1443,7 @@ public class CentipedeIK : MonoBehaviour
         float speedMagnitude = headRb != null ? headRb.linearVelocity.magnitude : 0f;
         
         // Faster rotation when moving, boosted even further when reaching for 'snappy' control
-        float reachFactorNow = Vector2.Dot(smoothedInput.normalized, avgNormal);
+        float reachFactorNow = smoothedInput.sqrMagnitude > 0.01f ? Vector2.Dot(smoothedInput.normalized, avgNormal) : 0f;
         float reachBoost = Mathf.Lerp(1.0f, 2.5f, Mathf.Clamp01(reachFactorNow)); 
         float speedScale = headRb != null ? headRb.linearVelocity.magnitude : 0f;
         float rotSpeedCurve = rotationSpeed * Mathf.Lerp(1.0f, 4.0f, speedScale / 8f) * reachBoost;
@@ -1339,13 +1456,8 @@ public class CentipedeIK : MonoBehaviour
         for (int i = 0; i < searchLimit; i++)
         {
             var leg = legs[i];
-            if (leg.bodyTransform != headT && planted > 0)
-            {
-                 // ensure we only use the fallback if necessary
-                 bool onHead = false;
-                 for(int j=0; j<legs.Length; j++) if(legs[j].bodyTransform == headT && legs[j].isPlanted) { onHead = true; break; }
-                 if(onHead) continue;
-            }
+            // Only include legs that contributed to the influence group
+            if (headLegsPlanted && leg.bodyTransform != headT) continue;
 
             if (!leg.isPlanted) continue;
 
@@ -1383,30 +1495,30 @@ public class CentipedeIK : MonoBehaviour
         float gripFactor = Mathf.Max(headGrip, bodyGrip * 0.5f) * groundedEfficiency;
 
 
-        // 2. Head Rotation (Steering)
+        // 2. Head Rotation (Steering) — TORQUE-DRIVEN
+        // Instead of computing a target angle and teleporting towards it (MoveRotation),
+        // we apply torque through the physics engine — the same system used for body segments.
+        // This eliminates oscillation because the physics integrator naturally smooths the result.
         float finalHeading = targetAngle;
         if (steeredMovementDir.sqrMagnitude > 0.01f)
         {
             finalHeading = Mathf.LerpAngle(targetAngle, currentSteerHeading, 0.7f); 
-            
-            if (showDebug) 
-            {
-                // Debug.Log($"[Centipede] SteerH: {currentSteerHeading:F1}° | FinalH: {finalHeading:F1}° | Grip: {gripFactor:P0}");
-            }
         }
         
-        // Final sprite rotation Z is just the mathematical world heading
         // POSTURAL CONTROL: Uses 'muscleInfluence' to maintain player aim even in a fall.
         float muscleStiffness = 1.0f + Mathf.Clamp01(userLiftInput) * 2.0f;
         if (groundedness < 0.01f) muscleStiffness *= airborneMuscleStiffness;
         
-        headT.rotation = Quaternion.Slerp(headT.rotation, Quaternion.Euler(0, 0, finalHeading), Time.fixedDeltaTime * rotSpeedCurve * muscleStiffness * muscleInfluence);
-        headRb.freezeRotation = true;
+        // PD torque controller: spring towards target + damp angular velocity
+        float headAngleError = Mathf.DeltaAngle(headRb.rotation, finalHeading);
+        float headTorqueK = rotSpeedCurve * 80f * muscleStiffness * muscleInfluence; // Spring
+        float headTorqueD = 12f * muscleStiffness; // Damping (angular drag supplements this)
+        float headTorque = headAngleError * headTorqueK - headRb.angularVelocity * headTorqueD;
+        headRb.AddTorque(headTorque * headRb.mass, ForceMode2D.Force);
 
         // 3. Movement (Propulsion - NOSE PULL)
         // We calculate 'Forward' relative to the transform's base coordinate system using the offset
         Vector2 localForward = (Quaternion.Euler(0, 0, headForwardOffset) * Vector2.right);
-        Vector2 worldForward = headT.TransformDirection(localForward);
         
         // Propulsion pulls the nose along the calculated steer direction
         // Boosted force when reaching/climbing:
@@ -1433,20 +1545,24 @@ public class CentipedeIK : MonoBehaviour
         
         Vector2 springForce = avgNormal * liftForceMag * groundedEfficiency; 
         
-        // Add a 'Ground Compression' factor: limit velocity downward if we are already low
-        if (heightError < -0.1f && Vector2.Dot(headRb.linearVelocity, avgNormal) < 0)
+        // Ground compression: apply a counter-force instead of directly mutating velocity
+        if (heightError < -0.1f)
         {
-            headRb.linearVelocity -= avgNormal * Vector2.Dot(headRb.linearVelocity, avgNormal) * 0.5f;
+            float downwardVel = Vector2.Dot(headRb.linearVelocity, avgNormal);
+            if (downwardVel < 0)
+            {
+                // Counter-force proportional to the downward velocity (acts as extra damping)
+                springForce += avgNormal * (-downwardVel * dampScalar * 0.5f * groundedEfficiency);
+            }
         }
 
         // 5. DISTRIBUTED LIFT & GRAVITY CANCEL
-        Vector2 noseTip = (Vector2)headT.TransformPoint(localForward * 0.5f);
 
         // Braking... (Reduced strength to prevent tail anchoring)
         if (smoothedInput.sqrMagnitude < 0.01f && totalPlanted > 0)
         {
             float brakeStrength = Mathf.Lerp(5.0f, 25.0f, (float)totalPlanted / legs.Length);
-            headRb.AddForce(-headRb.linearVelocity * headRb.mass * brakeStrength, ForceMode2D.Force);
+            headRb.AddForce(-headRb.linearVelocity * brakeStrength, ForceMode2D.Force);
             locomotionForce = Vector2.zero;
         }
 
@@ -1460,16 +1576,17 @@ public class CentipedeIK : MonoBehaviour
         // Bias towards Head Authority to ensure wall-reaches don't sink.
         Vector2 gravNeutralizer = -Physics2D.gravity * headRb.gravityScale * headRb.mass * (linearTraction);
         headRb.AddForce(springForce + gravNeutralizer + airplaneLift, ForceMode2D.Force);
-        headRb.AddForceAtPosition(locomotionForce * (linearTraction), noseTip, ForceMode2D.Force);
+        // Apply locomotion at center-of-mass to avoid phantom torque on the rotation-locked head
+        headRb.AddForce(locomotionForce * (linearTraction), ForceMode2D.Force);
 
         // --- Per-Segment suspension to prevent launching & floating ---
         if (usePhysicsSegments && bodySegments != null)
         {
-            // Reset segments
-            foreach (var seg in bodySegments)
+            // Reset segments using cached Rigidbody2D references
+            for (int si = 0; si < bodySegments.Length; si++)
             {
-                if (seg == null) continue;
-                Rigidbody2D rb = seg.GetComponent<Rigidbody2D>();
+                if (bodySegments[si] == null) continue;
+                Rigidbody2D rb = GetSegmentRb(si);
                 if (rb != null)
                 {
                     rb.gravityScale = gravityFactor; // Sync gravity with head to avoid disjointed falling
@@ -1478,17 +1595,16 @@ public class CentipedeIK : MonoBehaviour
             }
 
             // Apply lift ONLY to segments with planted feet
-            HashSet<Rigidbody2D> processedSegments = new HashSet<Rigidbody2D>();
+            processedSegments.Clear();
             foreach (var leg in legs)
             {
                 if (leg.isPlanted && leg.bodyTransform != headT && leg.bodyTransform != null)
                 {
-                    Rigidbody2D segRb = leg.bodyTransform.GetComponent<Rigidbody2D>();
+                    int segIdx = GetSegmentIndex(leg.bodyTransform);
+                    Rigidbody2D segRb = GetSegmentRb(segIdx);
                     if (segRb != null && !processedSegments.Contains(segRb))
                     {
                         processedSegments.Add(segRb);
-
-                        int segIdx = System.Array.IndexOf(bodySegments, leg.bodyTransform);
                         float progress = (float)segIdx / bodySegments.Length;
 
                         // Local curvature context
@@ -1613,6 +1729,36 @@ public class CentipedeIK : MonoBehaviour
         foreach (var leg in legs)
             if (leg.isStepping || !leg.isPlanted) n++;
         return n;
+    }
+
+    /// <summary>
+    /// O(1) leg index lookup. Returns -1 if not found.
+    /// </summary>
+    private int GetLegIndex(CentipedeLegIK leg)
+    {
+        if (legIndexLookup != null && legIndexLookup.TryGetValue(leg, out int idx))
+            return idx;
+        return System.Array.IndexOf(legs, leg);
+    }
+
+    /// <summary>
+    /// O(1) segment index lookup. Returns -1 if not found.
+    /// </summary>
+    private int GetSegmentIndex(Transform seg)
+    {
+        if (segmentIndexLookup != null && segmentIndexLookup.TryGetValue(seg, out int idx))
+            return idx;
+        return System.Array.IndexOf(bodySegments, seg);
+    }
+
+    /// <summary>
+    /// O(1) cached segment Rigidbody2D lookup. Returns null if not found.
+    /// </summary>
+    private Rigidbody2D GetSegmentRb(int segIdx)
+    {
+        if (segmentRbCache != null && segIdx >= 0 && segIdx < segmentRbCache.Length)
+            return segmentRbCache[segIdx];
+        return null;
     }
 
     private CentipedeLegIK GetLegForSegment(Transform seg)

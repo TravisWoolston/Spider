@@ -101,6 +101,10 @@ public class WebSegment : MonoBehaviour
     public float pulseAttackDuration = 0.1f; // How long the light takes to reach peak brightness
     public Color pulseColor = Color.white;  // Pulse color for the sprite
     public float spatialPulseRadius = 15f;  // Radius for immediate spatial glow
+    public float minLightIntensity = 1.0f;  // Min brightness when player has foot on it
+    public float lightDimSpeed = 10.0f;     // How fast light fades when player leaves
+
+    private float currentPulseStrength = 0f;
 
     void Start()
     {
@@ -166,7 +170,7 @@ public class WebSegment : MonoBehaviour
         lastPulseId = pulseId;
 
         // Capture current state to lerp from instead of snapping
-        float startInt = (pulseLight != null) ? pulseLight.intensity / maxLightIntensity : 0f;
+        float startInt = currentPulseStrength;
 
         StopAllCoroutines();
         StartCoroutine(PulseRoutine(strength, pulseId, propagate, startInt));
@@ -181,11 +185,6 @@ public class WebSegment : MonoBehaviour
         // Propagation settings (ignored if propagate is false)
         float propagationDelay = 0.04f;
         
-        if (pulseLight != null)
-        {
-            pulseLight.enabled = true;
-        }
-
         while (elapsed < duration)
         {
             elapsed += Time.deltaTime;
@@ -209,13 +208,7 @@ public class WebSegment : MonoBehaviour
                 spriteRenderer.color = Color.Lerp(originalColor, pulseColor, currentStrength);
             }
 
-            if (pulseLight != null)
-            {
-                pulseLight.color = Color.white;
-                // Only visible if the player is currently touching this connected web network
-                bool playerSensing = (lastSensedFrame == Time.frameCount);
-                pulseLight.intensity = playerSensing ? maxLightIntensity * currentStrength : 0;
-            }
+            currentPulseStrength = currentStrength;
 
             if (propagate && elapsed >= propagationDelay && propagationDelay > 0)
             {
@@ -237,20 +230,58 @@ public class WebSegment : MonoBehaviour
             spriteRenderer.color = originalColor;
         }
 
-        if (pulseLight != null)
-        {
-            pulseLight.intensity = 0;
-            pulseLight.enabled = false;
-        }
+        currentPulseStrength = 0f;
     }
 
     void Update()
     {
+        UpdateLighting();
+
         if (!firstSegment)
         {
             return;
         }
         CheckContact();
+    }
+
+    private void UpdateLighting()
+    {
+        if (pulseLight == null) return;
+
+        // Use >= Time.frameCount - 1 to ensure order of execution between WebSegment 
+        // and SpiderControllerIK doesn't cause single-frame flickering
+        bool playerSensing = (lastSensedFrame >= Time.frameCount - 1);
+        
+        float targetIntensity = 0f;
+        if (playerSensing)
+        {
+            targetIntensity = Mathf.Max(minLightIntensity, maxLightIntensity * currentPulseStrength);
+            // Snap quickly to track pulses closely when active
+            pulseLight.intensity = targetIntensity;
+        }
+        else
+        {
+            // Dim smoothly when leaving the web
+            targetIntensity = 0f;
+            pulseLight.intensity = Mathf.MoveTowards(
+                pulseLight.intensity, 
+                targetIntensity, 
+                lightDimSpeed * Time.deltaTime
+            );
+        }
+
+        if (pulseLight.intensity > 0.01f)
+        {
+            if (!pulseLight.enabled) pulseLight.enabled = true;
+        }
+        else
+        {
+            if (pulseLight.enabled)
+            {
+                pulseLight.intensity = 0f;
+                pulseLight.enabled = false;
+            }
+        }
     }
 
     // public void CheckContact()

@@ -95,7 +95,7 @@ GameObject:
   - component: {fileID: 2454144349433107292}
   - component: {fileID: 3961737650831727509}
   - component: {fileID: 5375195231474957990}
-  - component: {fileID: 1709090030534485049}
+  - component: {fileID: 7479204066149560279}
   m_Layer: 8
   m_Name: Spider Foot R5
   m_TagString: Untagged
@@ -185,9 +185,9 @@ Rigidbody2D:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1988984573468284081}
-  m_BodyType: 0
-  m_Simulated: 0
-  m_UseFullKinematicContacts: 0
+  m_BodyType: 1
+  m_Simulated: 1
+  m_UseFullKinematicContacts: 1
   m_UseAutoMass: 0
   m_Mass: 1
   m_LinearDamping: 0
@@ -202,9 +202,9 @@ Rigidbody2D:
     m_Bits: 0
   m_Interpolate: 0
   m_SleepingMode: 1
-  m_CollisionDetection: 0
+  m_CollisionDetection: 1
   m_Constraints: 0
---- !u!233 &1709090030534485049
+--- !u!233 &7479204066149560279
 HingeJoint2D:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
@@ -218,9 +218,9 @@ HingeJoint2D:
   m_BreakForce: Infinity
   m_BreakTorque: Infinity
   m_BreakAction: 3
-  m_AutoConfigureConnectedAnchor: 1
+  m_AutoConfigureConnectedAnchor: 0
   m_Anchor: {x: 0, y: 0}
-  m_ConnectedAnchor: {x: 2.999527, y: -13.740001}
+  m_ConnectedAnchor: {x: 1.6245737, y: -13.49662}
   m_UseConnectedAnchor: 1
   m_UseMotor: 0
   m_Motor:
@@ -241,6 +241,7 @@ GameObject:
   - component: {fileID: 7442650655851227912}
   - component: {fileID: 4815549301404955518}
   - component: {fileID: 3248467106077323871}
+  - component: {fileID: 3807396681233525211}
   m_Layer: 8
   m_Name: Spider Foot L1
   m_TagString: Untagged
@@ -330,9 +331,9 @@ Rigidbody2D:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 2107061996913064677}
-  m_BodyType: 0
-  m_Simulated: 0
-  m_UseFullKinematicContacts: 0
+  m_BodyType: 1
+  m_Simulated: 1
+  m_UseFullKinematicContacts: 1
   m_UseAutoMass: 0
   m_Mass: 1
   m_LinearDamping: 0
@@ -347,8 +348,34 @@ Rigidbody2D:
     m_Bits: 0
   m_Interpolate: 0
   m_SleepingMode: 1
-  m_CollisionDetection: 0
+  m_CollisionDetection: 1
   m_Constraints: 0
+--- !u!233 &3807396681233525211
+HingeJoint2D:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 2107061996913064677}
+  m_Enabled: 0
+  serializedVersion: 4
+  m_EnableCollision: 0
+  m_ConnectedRigidBody: {fileID: 0}
+  m_BreakForce: Infinity
+  m_BreakTorque: Infinity
+  m_BreakAction: 3
+  m_AutoConfigureConnectedAnchor: 0
+  m_Anchor: {x: 0, y: 0}
+  m_ConnectedAnchor: {x: -25.682255, y: -11.129726}
+  m_UseConnectedAnchor: 1
+  m_UseMotor: 0
+  m_Motor:
+    m_MotorSpeed: 0
+    m_MaximumMotorForce: 10000
+  m_UseLimits: 0
+  m_AngleLimits:
+    m_LowerAngle: 0
+    m_UpperAngle: 359
 --- !u!1 &3187673539301939298
 GameObject:
   m_ObjectHideFlags: 0
@@ -469,9 +496,14 @@ MonoBehaviour:
   digRecoveryTime: 0.12
   digStrikeInterval: 0.2
   strikeKey: 323
-  sparStrikeSpeed: 180
+  sparStanceKey: 101
+  sparStrikeSpeed: 500
+  strikeLayers:
+    serializedVersion: 2
+    m_Bits: 0
   inputDirection: {x: 0, y: 0}
   aiHeightInput: 0
+  isDead: 0
 --- !u!1 &4282771279900100916
 GameObject:
   m_ObjectHideFlags: 0
@@ -483,7 +515,7 @@ GameObject:
   - component: {fileID: 1093371968334155664}
   - component: {fileID: 7200331225971243833}
   - component: {fileID: 7302958763301803078}
-  - component: {fileID: 2169512615081051121}
+  - component: {fileID: 5177398821363880275}
   m_Layer: 8
   m_Name: Spider Foot R3
   m_TagString: Untagged
@@ -573,9 +605,9 @@ Rigidbody2D:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 4282771279900100916}
-  m_BodyType: 0
-  m_Simulated: 0
-  m_UseFullKinematicContacts: 0
+  m_BodyType: 1
+  m_Simulated: 1
+  m_UseFullKinematicContacts: 1
   m_UseAutoMass: 0
   m_Mass: 1
   m_LinearDamping: 0
@@ -590,9 +622,9 @@ Rigidbody2D:
     m_Bits: 0
   m_Interpolate: 0
   m_SleepingMode: 1
-  m_CollisionDetection: 0
+  m_CollisionDetection: 1
   m_Constraints: 0
---- !u!233 &2169512615081051121
+--- !u!233 &5177398821363880275
 HingeJoint2D:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
@@ -606,9 +638,9 @@ HingeJoint2D:
   m_BreakForce: Infinity
   m_BreakTorque: Infinity
   m_BreakAction: 3
-  m_AutoConfigureConnectedAnchor: 1
+  m_AutoConfigureConnectedAnchor: 0
   m_Anchor: {x: 0, y: 0}
-  m_ConnectedAnchor: {x: 2.9913807, y: -13.688001}
+  m_ConnectedAnchor: {x: 2.2158623, y: -13.991879}
   m_UseConnectedAnchor: 1
   m_UseMotor: 0
   m_Motor:
@@ -629,7 +661,7 @@ GameObject:
   - component: {fileID: 6643458689403186195}
   - component: {fileID: 4488907732385220941}
   - component: {fileID: 4899025669644030192}
-  - component: {fileID: 279274823862381126}
+  - component: {fileID: 4236569484162722524}
   m_Layer: 8
   m_Name: Spider Foot R1
   m_TagString: Untagged
@@ -719,9 +751,9 @@ Rigidbody2D:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 5366370190055341903}
-  m_BodyType: 0
-  m_Simulated: 0
-  m_UseFullKinematicContacts: 0
+  m_BodyType: 1
+  m_Simulated: 1
+  m_UseFullKinematicContacts: 1
   m_UseAutoMass: 0
   m_Mass: 1
   m_LinearDamping: 0
@@ -736,9 +768,9 @@ Rigidbody2D:
     m_Bits: 0
   m_Interpolate: 0
   m_SleepingMode: 1
-  m_CollisionDetection: 0
+  m_CollisionDetection: 1
   m_Constraints: 0
---- !u!233 &279274823862381126
+--- !u!233 &4236569484162722524
 HingeJoint2D:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
@@ -752,9 +784,9 @@ HingeJoint2D:
   m_BreakForce: Infinity
   m_BreakTorque: Infinity
   m_BreakAction: 3
-  m_AutoConfigureConnectedAnchor: 1
+  m_AutoConfigureConnectedAnchor: 0
   m_Anchor: {x: 0, y: 0}
-  m_ConnectedAnchor: {x: 2.9053802, y: -13.72}
+  m_ConnectedAnchor: {x: 2.1446629, y: -13.015566}
   m_UseConnectedAnchor: 1
   m_UseMotor: 0
   m_Motor:
@@ -775,6 +807,7 @@ GameObject:
   - component: {fileID: 9071553674481634050}
   - component: {fileID: 8816996478908265408}
   - component: {fileID: 4354206430218920840}
+  - component: {fileID: 6041654656589395869}
   m_Layer: 8
   m_Name: Spider Foot L3
   m_TagString: Untagged
@@ -864,9 +897,9 @@ Rigidbody2D:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 6267479386856946802}
-  m_BodyType: 0
-  m_Simulated: 0
-  m_UseFullKinematicContacts: 0
+  m_BodyType: 1
+  m_Simulated: 1
+  m_UseFullKinematicContacts: 1
   m_UseAutoMass: 0
   m_Mass: 1
   m_LinearDamping: 0
@@ -881,8 +914,34 @@ Rigidbody2D:
     m_Bits: 0
   m_Interpolate: 0
   m_SleepingMode: 1
-  m_CollisionDetection: 0
+  m_CollisionDetection: 1
   m_Constraints: 0
+--- !u!233 &6041654656589395869
+HingeJoint2D:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 6267479386856946802}
+  m_Enabled: 0
+  serializedVersion: 4
+  m_EnableCollision: 0
+  m_ConnectedRigidBody: {fileID: 0}
+  m_BreakForce: Infinity
+  m_BreakTorque: Infinity
+  m_BreakAction: 3
+  m_AutoConfigureConnectedAnchor: 0
+  m_Anchor: {x: 0, y: 0}
+  m_ConnectedAnchor: {x: -22.719349, y: -16.249744}
+  m_UseConnectedAnchor: 1
+  m_UseMotor: 0
+  m_Motor:
+    m_MotorSpeed: 0
+    m_MaximumMotorForce: 10000
+  m_UseLimits: 0
+  m_AngleLimits:
+    m_LowerAngle: 0
+    m_UpperAngle: 359
 --- !u!1 &8001232591486513725
 GameObject:
   m_ObjectHideFlags: 0
@@ -931,6 +990,7 @@ GameObject:
   - component: {fileID: 421603500717089379}
   - component: {fileID: 6966119365019617594}
   - component: {fileID: 3785411608198701641}
+  - component: {fileID: 7923621177805554990}
   m_Layer: 8
   m_Name: Spider Foot L5
   m_TagString: Untagged
@@ -1020,9 +1080,9 @@ Rigidbody2D:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 8619042723333292481}
-  m_BodyType: 0
-  m_Simulated: 0
-  m_UseFullKinematicContacts: 0
+  m_BodyType: 1
+  m_Simulated: 1
+  m_UseFullKinematicContacts: 1
   m_UseAutoMass: 0
   m_Mass: 1
   m_LinearDamping: 0
@@ -1037,8 +1097,34 @@ Rigidbody2D:
     m_Bits: 0
   m_Interpolate: 0
   m_SleepingMode: 1
-  m_CollisionDetection: 0
+  m_CollisionDetection: 1
   m_Constraints: 0
+--- !u!233 &7923621177805554990
+HingeJoint2D:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 8619042723333292481}
+  m_Enabled: 0
+  serializedVersion: 4
+  m_EnableCollision: 0
+  m_ConnectedRigidBody: {fileID: 0}
+  m_BreakForce: Infinity
+  m_BreakTorque: Infinity
+  m_BreakAction: 3
+  m_AutoConfigureConnectedAnchor: 0
+  m_Anchor: {x: 0, y: 0}
+  m_ConnectedAnchor: {x: -23.709255, y: -12.227581}
+  m_UseConnectedAnchor: 1
+  m_UseMotor: 0
+  m_Motor:
+    m_MotorSpeed: 0
+    m_MaximumMotorForce: 10000
+  m_UseLimits: 0
+  m_AngleLimits:
+    m_LowerAngle: 0
+    m_UpperAngle: 359
 --- !u!1001 &3187673537683079495
 PrefabInstance:
   m_ObjectHideFlags: 0
@@ -1121,7 +1207,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 4113319618774104095, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_BodyType
-      value: 1
+      value: 0
       objectReference: {fileID: 0}
     - target: {fileID: 4113319618774104095, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_UseAutoMass
@@ -1375,7 +1461,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 4113319618774104095, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_BodyType
-      value: 1
+      value: 0
       objectReference: {fileID: 0}
     - target: {fileID: 4113319618774104095, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_UseAutoMass
@@ -1775,6 +1861,8 @@ MonoBehaviour:
   plantedTransform: {fileID: 0}
   isDigStriking: 0
   isSparring: 0
+  isSparStriking: 0
+  isHolding: 0
   sparAimTarget: {x: 0, y: 0}
   shoulderOnThigh: {x: 0, y: 0}
   elbowOnThigh: {x: 0, y: 0}
@@ -1874,7 +1962,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 4113319618774104095, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_BodyType
-      value: 1
+      value: 0
       objectReference: {fileID: 0}
     - target: {fileID: 4113319618774104095, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_UseAutoMass
@@ -2132,7 +2220,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 4113319618774104095, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_BodyType
-      value: 1
+      value: 0
       objectReference: {fileID: 0}
     - target: {fileID: 4113319618774104095, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_UseAutoMass
@@ -2386,7 +2474,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 4113319618774104095, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_BodyType
-      value: 1
+      value: 0
       objectReference: {fileID: 0}
     - target: {fileID: 4113319618774104095, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_UseAutoMass
@@ -2790,6 +2878,8 @@ MonoBehaviour:
   plantedTransform: {fileID: 0}
   isDigStriking: 0
   isSparring: 0
+  isSparStriking: 0
+  isHolding: 0
   sparAimTarget: {x: 0, y: 0}
   shoulderOnThigh: {x: 0, y: 0}
   elbowOnThigh: {x: 0, y: 0}
@@ -3031,6 +3121,8 @@ MonoBehaviour:
   plantedTransform: {fileID: 0}
   isDigStriking: 0
   isSparring: 0
+  isSparStriking: 0
+  isHolding: 0
   sparAimTarget: {x: 0, y: 0}
   shoulderOnThigh: {x: 0, y: 0}
   elbowOnThigh: {x: 0, y: 0}
@@ -3272,6 +3364,8 @@ MonoBehaviour:
   plantedTransform: {fileID: 0}
   isDigStriking: 0
   isSparring: 0
+  isSparStriking: 0
+  isHolding: 0
   sparAimTarget: {x: 0, y: 0}
   shoulderOnThigh: {x: 0, y: 0}
   elbowOnThigh: {x: 0, y: 0}
@@ -3513,6 +3607,8 @@ MonoBehaviour:
   plantedTransform: {fileID: 0}
   isDigStriking: 0
   isSparring: 0
+  isSparStriking: 0
+  isHolding: 0
   sparAimTarget: {x: 0, y: 0}
   shoulderOnThigh: {x: 0, y: 0}
   elbowOnThigh: {x: 0, y: 0}
@@ -3608,7 +3704,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 4113319618774104095, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_BodyType
-      value: 1
+      value: 0
       objectReference: {fileID: 0}
     - target: {fileID: 4113319618774104095, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_UseAutoMass
@@ -4008,6 +4104,8 @@ MonoBehaviour:
   plantedTransform: {fileID: 0}
   isDigStriking: 0
   isSparring: 0
+  isSparStriking: 0
+  isHolding: 0
   sparAimTarget: {x: 0, y: 0}
   shoulderOnThigh: {x: 0, y: 0}
   elbowOnThigh: {x: 0, y: 0}
@@ -4079,7 +4177,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 4267492975921498738, guid: 09818f7a571dbf04ebffdebf5496bafd, type: 3}
       propertyPath: m_Layer
-      value: 3
+      value: 9
       objectReference: {fileID: 0}
     - target: {fileID: 6241004136903640457, guid: 09818f7a571dbf04ebffdebf5496bafd, type: 3}
       propertyPath: m_SortingLayer

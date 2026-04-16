@@ -59,10 +59,12 @@ public class SpiderLegIK : MonoBehaviour
     [HideInInspector] public bool isDigStriking = false;
     private Rigidbody2D footRb;
     private Rigidbody2D shinRb;
+    private HingeJoint2D footHoldJoint; // Disabled by default; used to physically attach held objects
 
     // ── Sparring state ────────────────────────────────────────
     [HideInInspector] public bool isSparring = false;
     [HideInInspector] public bool isSparStriking = false;
+    [HideInInspector] public bool isHolding = false;  // Carrying a killed spider
     [HideInInspector] public Vector2 sparAimTarget;  // World-space aim point (mouse) during sparring wind-up/strike
 
     // ── IK Hysteresis state ────────────────────────────────────
@@ -102,6 +104,7 @@ public class SpiderLegIK : MonoBehaviour
 
         // Cache foot/shin rigidbodies for dig-strike
         if (foot != null) footRb = foot.GetComponent<Rigidbody2D>();
+        if (foot != null) footHoldJoint = foot.GetComponent<HingeJoint2D>();
         if (shin != null) shinRb = shin.GetComponent<Rigidbody2D>();
 
         if (useLimbSolver && ikTarget != null)
@@ -248,10 +251,10 @@ public class SpiderLegIK : MonoBehaviour
         var rb = t.GetComponent<Rigidbody2D>();
         if (rb != null)
         {
-            rb.bodyType = RigidbodyType2D.Dynamic;
-            rb.gravityScale = 0f;      // IK controls position, not gravity
-            rb.mass = 0.1f;            // lightweight so physics doesn't fight IK
-            rb.linearDamping = 10f;        // heavy damping prevents drift
+            // Kinematic: IK fully controls position — prevents physics drift.
+            // Dynamic bodies accumulate velocity from collisions/forces,
+            // causing the foot to slowly separate from its IK target.
+            rb.bodyType = RigidbodyType2D.Kinematic;
         }
         foreach (var j in t.GetComponents<HingeJoint2D>())
             j.enabled = false;
@@ -708,8 +711,12 @@ public class SpiderLegIK : MonoBehaviour
         isSparring = true;
         isSparStriking = true;
         isPlanted = false;
-        plantedTransform = null;
-        plantedRb = null;
+        // Preserve held object references when holding — impact detection needs them
+        if (!isHolding)
+        {
+            plantedTransform = null;
+            plantedRb = null;
+        }
 
         // Compute the shoulder position for the thrust line
         Vector2 shoulderWorld = bodyTransform != null
@@ -747,15 +754,132 @@ public class SpiderLegIK : MonoBehaviour
         }
         currentFootPos = thrustEndpoint;
 
-        // Check for physical impact along the thrust line for force transfer
-        RaycastHit2D hit = Physics2D.Raycast(shoulderWorld, strikeDir, thrustReach + 0.2f, controller.attachableLayers);
-        if (hit.collider != null)
+        // ── Impact detection: overlap + raycast for thin targets like webs ──
+        float strikeRadius = 1.0f;
+        var strikeBuffer = new Collider2D[20];
+        int strikeHits = Physics2D.OverlapCircleNonAlloc(currentFootPos, strikeRadius, strikeBuffer, controller.strikeLayers);
+
+        // Filter out self and held object from overlap results
+        Collider2D hitCol = null;
+        for (int i = 0; i < strikeHits; i++)
         {
-            var impactRb = hit.collider.GetComponentInParent<Rigidbody2D>();
-            if (impactRb != null && impactRb != controller.headRb)
+            var col = strikeBuffer[i];
+            if (col == null) continue;
+
+            var colSpider = col.GetComponentInParent<SpiderControllerIK>();
+            if (colSpider == controller) continue;
+
+            if (isHolding && plantedRb != null)
             {
-                impactRb.AddForceAtPosition(strikeDir * (controller.headRb.mass * 12f), hit.point, ForceMode2D.Impulse);
+                var heldSpider = col.GetComponentInParent<SpiderControllerIK>();
+                if (heldSpider != null && heldSpider.headRb == plantedRb)
+                    continue;
             }
+
+            hitCol = col;
+            break;
+        }
+
+        // Fallback: raycast along thrust line (catches thin web strands the overlap missed)
+        if (hitCol == null)
+        {
+            var rayHits = Physics2D.RaycastAll(shoulderWorld, strikeDir, thrustReach + 0.5f, controller.strikeLayers);
+            foreach (var rh in rayHits)
+            {
+                if (rh.collider == null) continue;
+
+                var colSpider = rh.collider.GetComponentInParent<SpiderControllerIK>();
+                if (colSpider == controller) continue;
+
+                if (isHolding && plantedRb != null)
+                {
+                    var heldSpider = rh.collider.GetComponentInParent<SpiderControllerIK>();
+                    if (heldSpider != null && heldSpider.headRb == plantedRb)
+                        continue;
+                }
+
+                hitCol = rh.collider;
+                break;
+            }
+        }
+
+        if (hitCol != null)
+        {
+            int webLayer = LayerMask.NameToLayer("Web");
+
+            if (isHolding)
+                Debug.Log($"[SparStrike] Holding + hit: {hitCol.gameObject.name} (layer={LayerMask.LayerToName(hitCol.gameObject.layer)})");
+
+            // ── Holding something: try to stick it to a web ──
+            if (isHolding && plantedRb != null)
+            {
+                if (hitCol.gameObject.layer == webLayer)
+                {
+                    // Create a hinge joint on the held object to pin it to the web
+                    var webRb = hitCol.GetComponentInParent<Rigidbody2D>();
+                    Debug.Log($"[SparStrike] Sticking to web! plantedRb={plantedRb.gameObject.name}, webRb={(webRb != null ? webRb.gameObject.name : "NULL")}");
+
+                    var stickJoint = plantedRb.gameObject.AddComponent<HingeJoint2D>();
+                    stickJoint.autoConfigureConnectedAnchor = false;
+                    stickJoint.anchor = Vector2.zero;
+                    stickJoint.connectedBody = webRb;
+
+                    // Snap to nearest pivot of the web segment for a clean connection
+                    var webSeg = hitCol.GetComponent<WebSegment>();
+                    if (webSeg != null)
+                    {
+                        Vector2 localHit = webSeg.transform.InverseTransformPoint(currentFootPos);
+                        float dStart = Vector2.Distance(localHit, webSeg.hinge2.anchor);
+                        float dEnd = Vector2.Distance(localHit, webSeg.hinge.anchor);
+                        stickJoint.connectedAnchor = (dStart < dEnd) ? webSeg.hinge2.anchor : webSeg.hinge.anchor;
+                    }
+                    else
+                    {
+                        stickJoint.connectedAnchor = hitCol.transform.InverseTransformPoint(currentFootPos);
+                    }
+
+                    Debug.Log($"[SparStrike] Joint created. anchor={stickJoint.anchor}, connectedAnchor={stickJoint.connectedAnchor}, enabled={stickJoint.enabled}");
+
+                    // Release the hold — the dead spider now hangs from the web
+                    DropHeldObject();
+                    Debug.Log($"[SparStrike] Dropped. isHolding={isHolding}");
+                }
+                else
+                {
+                    // Non-web impact while holding: force transfer
+                    var impactRb = hitCol.GetComponentInParent<Rigidbody2D>();
+                    if (impactRb != null && impactRb != controller.headRb)
+                    {
+                        impactRb.AddForceAtPosition(strikeDir * (controller.headRb.mass * 12f), currentFootPos, ForceMode2D.Impulse);
+                    }
+                }
+            }
+            else
+            {
+                // ── Not holding: kill/grab spiders, or force transfer ──
+                var victimSpider = hitCol.GetComponentInParent<SpiderControllerIK>();
+                if (victimSpider != null && victimSpider != controller)
+                {
+                    // Kill the struck spider (no-op if already dead — allows re-grabbing)
+                    victimSpider.Die();
+
+                    // Physically attach the dead spider's head to our foot via hinge joint
+                    AttachToFoot(victimSpider.headRb);
+                }
+                else
+                {
+                    // Non-spider impact: apply force transfer
+                    var impactRb = hitCol.GetComponentInParent<Rigidbody2D>();
+                    if (impactRb != null && impactRb != controller.headRb)
+                    {
+                        impactRb.AddForceAtPosition(strikeDir * (controller.headRb.mass * 12f), currentFootPos, ForceMode2D.Impulse);
+                    }
+                }
+            }
+        }
+        else if (isHolding)
+        {
+            Debug.Log($"[SparStrike] Holding but NO hit detected. footPos={currentFootPos}, overlapHits={strikeHits}, strikeLayers={controller.strikeLayers.value}");
         }
 
         // Very brief pause to sell the impact
@@ -786,23 +910,72 @@ public class SpiderLegIK : MonoBehaviour
 
     public void SyncToSurface()
     {
-        if (plantedTransform != null)
+        if (plantedTransform == null) return;
+
+        // Holding mode: the foot’s HingeJoint2D handles the physical connection.
+        // Just skip normal surface-tracking so the foot isn’t dragged to the held object.
+        if (isHolding) return;
+
+        // ── Normal surface tracking ──
+        Vector2 newWorldPos = plantedTransform.TransformPoint(plantedLocalPos);
+
+        if (isStepping)
         {
-            // Update the world position based on the transform it's attached to
-            Vector2 newWorldPos = plantedTransform.TransformPoint(plantedLocalPos);
-            
-            if (isStepping)
-            {
-                // If we are stepping, we update the target so the leg follows the moving surface mid-air
-                currentStepTarget = newWorldPos;
-            }
-            else if (isPlanted)
-            {
-                // If we are planted, the foot stays locked to the surface
-                currentFootPos = newWorldPos;
-                targetFootPos  = newWorldPos;
-            }
+            // If we are stepping, we update the target so the leg follows the moving surface mid-air
+            currentStepTarget = newWorldPos;
         }
+        else if (isPlanted)
+        {
+            // If we are planted, the foot stays locked to the surface
+            currentFootPos = newWorldPos;
+            targetFootPos  = newWorldPos;
+        }
+    }
+
+    /// <summary>
+    /// Physically attaches a rigidbody to the foot using the hold hinge joint.
+    /// </summary>
+    public void AttachToFoot(Rigidbody2D targetRb)
+    {
+        if (targetRb == null) return;
+
+        isHolding = true;
+        isPlanted = false;
+        plantedTransform = targetRb.transform;
+        plantedRb = targetRb;
+        plantedLocalPos = targetRb.transform.InverseTransformPoint(currentFootPos);
+
+        if (footHoldJoint != null)
+        {
+            // Configure anchors so the joint doesn't snap —
+            // anchor is at the foot tip (local origin), connectedAnchor is
+            // where the foot currently touches the target in the target's local space.
+            footHoldJoint.autoConfigureConnectedAnchor = false;
+            footHoldJoint.anchor = Vector2.zero;
+            footHoldJoint.connectedAnchor = Vector2.zero;
+            footHoldJoint.connectedBody = targetRb;
+            footHoldJoint.enableCollision = false;
+            footHoldJoint.enabled = true;
+        }
+    }
+
+    /// <summary>
+    /// Releases whatever this leg is holding and returns it to normal state.
+    /// </summary>
+    public void DropHeldObject()
+    {
+        if (!isHolding) return;
+        isHolding = false;
+
+        if (footHoldJoint != null)
+        {
+            footHoldJoint.enabled = false;
+            footHoldJoint.connectedBody = null;
+        }
+
+        plantedTransform = null;
+        plantedRb = null;
+        isPlanted = false;
     }
 
     void FixedUpdate()

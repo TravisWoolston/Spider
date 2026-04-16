@@ -445,8 +445,15 @@ MonoBehaviour:
   digWindUpTime: 0.15
   digRecoveryTime: 0.12
   digStrikeInterval: 0.2
+  strikeKey: 323
+  sparStanceKey: 101
+  sparStrikeSpeed: 180
+  strikeLayers:
+    serializedVersion: 2
+    m_Bits: 0
   inputDirection: {x: 0, y: 0}
   aiHeightInput: 0
+  isDead: 0
 --- !u!114 &2793808374688252997
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -1067,7 +1074,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 532760844, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_UseMotor
-      value: 1
+      value: 0
       objectReference: {fileID: 0}
     - target: {fileID: 532760844, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_UseLimits
@@ -1321,7 +1328,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 532760844, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_UseMotor
-      value: 1
+      value: 0
       objectReference: {fileID: 0}
     - target: {fileID: 532760844, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_UseLimits
@@ -1571,7 +1578,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 532760844, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_UseMotor
-      value: 1
+      value: 0
       objectReference: {fileID: 0}
     - target: {fileID: 532760844, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_UseLimits
@@ -1784,6 +1791,9 @@ MonoBehaviour:
   plantedNormal: {x: 0, y: 0}
   plantedTransform: {fileID: 0}
   isDigStriking: 0
+  isSparring: 0
+  isSparStriking: 0
+  sparAimTarget: {x: 0, y: 0}
   shoulderOnThigh: {x: 0, y: 0}
   elbowOnThigh: {x: 0, y: 0}
   elbowOnShin: {x: 0, y: 0}
@@ -1818,7 +1828,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 532760844, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_UseMotor
-      value: 1
+      value: 0
       objectReference: {fileID: 0}
     - target: {fileID: 532760844, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_UseLimits
@@ -2076,7 +2086,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 532760844, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_UseMotor
-      value: 1
+      value: 0
       objectReference: {fileID: 0}
     - target: {fileID: 532760844, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_UseLimits
@@ -2330,7 +2340,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 532760844, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_UseMotor
-      value: 1
+      value: 0
       objectReference: {fileID: 0}
     - target: {fileID: 532760844, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_UseLimits
@@ -2580,7 +2590,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 532760844, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_UseMotor
-      value: 1
+      value: 0
       objectReference: {fileID: 0}
     - target: {fileID: 532760844, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_UseLimits
@@ -2797,6 +2807,9 @@ MonoBehaviour:
   plantedNormal: {x: 0, y: 0}
   plantedTransform: {fileID: 0}
   isDigStriking: 0
+  isSparring: 0
+  isSparStriking: 0
+  sparAimTarget: {x: 0, y: 0}
   shoulderOnThigh: {x: 0, y: 0}
   elbowOnThigh: {x: 0, y: 0}
   elbowOnShin: {x: 0, y: 0}
@@ -2823,7 +2836,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 532760844, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_UseMotor
-      value: 1
+      value: 0
       objectReference: {fileID: 0}
     - target: {fileID: 532760844, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_UseLimits
@@ -3036,6 +3049,9 @@ MonoBehaviour:
   plantedNormal: {x: 0, y: 0}
   plantedTransform: {fileID: 0}
   isDigStriking: 0
+  isSparring: 0
+  isSparStriking: 0
+  sparAimTarget: {x: 0, y: 0}
   shoulderOnThigh: {x: 0, y: 0}
   elbowOnThigh: {x: 0, y: 0}
   elbowOnShin: {x: 0, y: 0}
@@ -3062,7 +3078,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 532760844, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_UseMotor
-      value: 1
+      value: 0
       objectReference: {fileID: 0}
     - target: {fileID: 532760844, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_UseLimits
@@ -3275,6 +3291,9 @@ MonoBehaviour:
   plantedNormal: {x: 0, y: 0}
   plantedTransform: {fileID: 0}
   isDigStriking: 0
+  isSparring: 0
+  isSparStriking: 0
+  sparAimTarget: {x: 0, y: 0}
   shoulderOnThigh: {x: 0, y: 0}
   elbowOnThigh: {x: 0, y: 0}
   elbowOnShin: {x: 0, y: 0}
@@ -3301,7 +3320,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 532760844, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_UseMotor
-      value: 1
+      value: 0
       objectReference: {fileID: 0}
     - target: {fileID: 532760844, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_UseLimits
@@ -3514,6 +3533,9 @@ MonoBehaviour:
   plantedNormal: {x: 0, y: 0}
   plantedTransform: {fileID: 0}
   isDigStriking: 0
+  isSparring: 0
+  isSparStriking: 0
+  sparAimTarget: {x: 0, y: 0}
   shoulderOnThigh: {x: 0, y: 0}
   elbowOnThigh: {x: 0, y: 0}
   elbowOnShin: {x: 0, y: 0}
@@ -3544,7 +3566,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 532760844, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_UseMotor
-      value: 1
+      value: 0
       objectReference: {fileID: 0}
     - target: {fileID: 532760844, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_UseLimits
@@ -3794,7 +3816,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 532760844, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_UseMotor
-      value: 1
+      value: 0
       objectReference: {fileID: 0}
     - target: {fileID: 532760844, guid: f01347198f5fb134ca5d942b20d3136e, type: 3}
       propertyPath: m_UseLimits
@@ -4007,6 +4029,9 @@ MonoBehaviour:
   plantedNormal: {x: 0, y: 0}
   plantedTransform: {fileID: 0}
   isDigStriking: 0
+  isSparring: 0
+  isSparStriking: 0
+  sparAimTarget: {x: 0, y: 0}
   shoulderOnThigh: {x: 0, y: 0}
   elbowOnThigh: {x: 0, y: 0}
   elbowOnShin: {x: 0, y: 0}
@@ -4077,7 +4102,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 4267492975921498738, guid: 09818f7a571dbf04ebffdebf5496bafd, type: 3}
       propertyPath: m_Layer
-      value: 3
+      value: 9
       objectReference: {fileID: 0}
     - target: {fileID: 6241004136903640457, guid: 09818f7a571dbf04ebffdebf5496bafd, type: 3}
       propertyPath: 'm_Materials.Array.data[0]'
@@ -4113,7 +4138,7 @@ Rigidbody2D:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 8599888468020921147}
-  m_BodyType: 1
+  m_BodyType: 0
   m_Simulated: 1
   m_UseFullKinematicContacts: 0
   m_UseAutoMass: 0

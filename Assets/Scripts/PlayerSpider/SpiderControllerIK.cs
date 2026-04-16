@@ -69,6 +69,8 @@ public class SpiderControllerIK : MonoBehaviour
     public KeyCode strikeKey = KeyCode.Mouse0;
     public KeyCode sparStanceKey = KeyCode.E;
     public float sparStrikeSpeed = 180f;
+    [Tooltip("Layers the spar strike can hit (include enemy head/body AND Web layers).")]
+    public LayerMask strikeLayers;
 
     // ── Runtime state ──────────────────────────────────────────
     private float targetBodyHeight = 0f;
@@ -842,6 +844,13 @@ public class SpiderControllerIK : MonoBehaviour
     void ExitSparStance()
     {
         isSparStance = false;
+
+        // Drop any held objects before replanting
+        if (sparStanceLeft != null && sparStanceLeft.isHolding)
+            sparStanceLeft.DropHeldObject();
+        if (sparStanceRight != null && sparStanceRight.isHolding)
+            sparStanceRight.DropHeldObject();
+
         if (sparStanceLeft != null && sparStanceLeft.isSparring && !sparStanceLeft.isStepping)
             ReplantStanceLeg(sparStanceLeft);
         if (sparStanceRight != null && sparStanceRight.isSparring && !sparStanceRight.isStepping)
@@ -911,6 +920,20 @@ public class SpiderControllerIK : MonoBehaviour
         if (idx < 0 || restingFootOffsets == null) return;
 
         Vector2 shoulderWorld = headT.TransformPoint(restingFootOffsets[idx]);
+
+        // If holding a dead spider, keep the leg in a carry arch —
+        // SyncToSurface will move the held object to follow the foot.
+        if (leg.isHolding)
+        {
+            Vector2 upDir = (Vector2)headT.up;
+            float sideSign = leg.isPhysicallyRight ? 1f : -1f;
+            Vector2 carryTarget = shoulderWorld + upDir * (leg.thighLength * 0.4f)
+                                + (Vector2)headT.right * sideSign * (leg.thighLength * 0.3f);
+            leg.currentFootPos = Vector2.Lerp(leg.currentFootPos, carryTarget, Time.deltaTime * 12f);
+            leg.sparAimTarget = Vector2.zero;
+            leg.plantedNormal = upDir;
+            return;
+        }
 
         if (trackTarget.HasValue)
         {
@@ -1308,6 +1331,104 @@ public class SpiderControllerIK : MonoBehaviour
                     }
                 }
             }
+        }
+    }
+
+    // ───────────────────────────────────────────────────────────
+    //  Death
+    // ───────────────────────────────────────────────────────────
+
+    [HideInInspector] public bool isDead = false;
+
+    /// <summary>
+    /// Kills this spider: ragdolls the body, releases all legs, and
+    /// disables IK/AI so it becomes a limp physics object.
+    /// </summary>
+    public void Die()
+    {
+        if (isDead) return;
+        isDead = true;
+
+        // Stop all leg coroutines (stepping, digging, sparring animations)
+        foreach (var leg in legs)
+        {
+            leg.StopAllCoroutines();
+            leg.isStepping = false;
+            leg.isDigStriking = false;
+            leg.isSparring = false;
+            leg.isSparStriking = false;
+            leg.isPlanted = false;
+            leg.plantedTransform = null;
+            leg.sparAimTarget = Vector2.zero;
+            leg.enabled = false;
+
+            // Re-enable physics on each segment so they ragdoll
+            EnableRagdollPhysics(leg.thigh);
+            EnableRagdollPhysics(leg.shin);
+            // Foot: enable rigidbody only — its only hinge is the hold joint,
+            // not a structural chain joint, so we must not re-enable it.
+            EnableRagdollBody(leg.foot);
+        }
+
+        // Ragdoll the head: let gravity take over, unfreeze rotation
+        if (headRb != null)
+        {
+            headRb.freezeRotation = false;
+            headRb.gravityScale = 1f;
+            headRb.linearVelocity = Vector2.zero;
+            headRb.angularVelocity = Random.Range(-60f, 60f);
+        }
+
+        // Disable AI if present
+        var ai = GetComponent<SpiderAI>();
+        if (ai != null) ai.enabled = false;
+
+        // Disable this controller so Update/FixedUpdate stop
+        enabled = false;
+    }
+
+    /// <summary>
+    /// Reverses DisablePhysics: sets the Rigidbody2D back to Dynamic with gravity
+    /// and re-enables all HingeJoint2D components so limbs stay connected.
+    /// </summary>
+    void EnableRagdollPhysics(Transform t)
+    {
+        if (t == null) return;
+        var rb = t.GetComponent<Rigidbody2D>();
+        if (rb != null)
+        {
+            // CRITICAL: Sync the rigidbody to the current transform position BEFORE
+            // switching to Dynamic. During IK, transforms were moved directly while the
+            // Kinematic rigidbody's internal physics position stayed stale. Without this
+            // sync, switching to Dynamic causes the body to snap to its old position and
+            // the hinge joints explode trying to resolve the mismatch.
+            rb.position = t.position;
+            rb.rotation = t.rotation.eulerAngles.z;
+            rb.bodyType = RigidbodyType2D.Dynamic;
+            rb.gravityScale = 1f;
+            rb.linearVelocity = Vector2.zero;
+            rb.angularVelocity = 0f;
+        }
+        foreach (var j in t.GetComponents<HingeJoint2D>())
+            j.enabled = true;
+    }
+
+    /// <summary>
+    /// Enables the Rigidbody2D for ragdoll but does NOT enable any HingeJoint2Ds.
+    /// Used for the foot, whose only hinge is the hold joint (not a structural limb joint).
+    /// </summary>
+    void EnableRagdollBody(Transform t)
+    {
+        if (t == null) return;
+        var rb = t.GetComponent<Rigidbody2D>();
+        if (rb != null)
+        {
+            rb.position = t.position;
+            rb.rotation = t.rotation.eulerAngles.z;
+            rb.bodyType = RigidbodyType2D.Dynamic;
+            rb.gravityScale = 1f;
+            rb.linearVelocity = Vector2.zero;
+            rb.angularVelocity = 0f;
         }
     }
 

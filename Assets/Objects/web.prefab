@@ -15,7 +15,6 @@ GameObject:
   - component: {fileID: 7641333692702301066}
   - component: {fileID: 7433672862795732455}
   - component: {fileID: 4922894431146084157}
-  - component: {fileID: 518166404675363216}
   m_Layer: 7
   m_Name: web
   m_TagString: Untagged
@@ -241,14 +240,14 @@ MonoBehaviour:
   overlapRadius: 0.2
   defaultLayer:
     serializedVersion: 2
-    m_Bits: 0
+    m_Bits: 1
   stringId: -1
   segmentLength: 0
   ignoreTransform: {fileID: 8631385482739706274}
   ignoreRadius: 0
   neighbors: []
   lastSensedFrame: -1
-  maxLightIntensity: 1
+  maxLightIntensity: 0.8
   lightOuterRadius: 30
   lightInnerRadius: 1
   lightFalloff: 0.9
@@ -258,55 +257,3 @@ MonoBehaviour:
   spatialPulseRadius: 100
   minLightIntensity: 0.2
   lightDimSpeed: 1
---- !u!114 &518166404675363216
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 92156152913644233}
-  m_Enabled: 0
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 7db70e0ea77f5ac47a8f4565a9406397, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
-  m_ShadowGroup: 0
-  m_Priority: 0
-  m_ComponentVersion: 5
-  m_HasRenderer: 1
-  m_UseRendererSilhouette: 1
-  m_CastsShadows: 1
-  m_SelfShadows: 0
-  m_AlphaCutoff: 0.1
-  m_ApplyToSortingLayers: 00000000
-  m_ShapePath:
-  - {x: -3.4100003, y: -0.18500042, z: 0}
-  - {x: -3.4100003, y: 0.18499994, z: 0}
-  - {x: 3.4100003, y: 0.18499994, z: 0}
-  - {x: 3.4100003, y: -0.18500042, z: 0}
-  m_ShapePathHash: 0
-  m_InstanceId: 36516
-  m_ShadowShape2DComponent: {fileID: 0}
-  m_ShadowShape2DProvider:
-    rid: -2
-  m_ShadowCastingSource: 1
-  m_ShadowMesh:
-    m_Mesh: {fileID: 0}
-    m_LocalBounds:
-      m_Center: {x: 0, y: -0.00000023841858, z: 0}
-      m_Extent: {x: 3.4100003, y: 0.18500018, z: 0}
-    m_EdgeProcessing: 1
-    m_TrimEdge: 0
-    m_FlipX: 0
-    m_FlipY: 0
-    m_InitialTrim: 0
-  m_CastingOption: 1
-  m_PreviousTrimEdge: 0
-  m_PreviousEdgeProcessing: 0
-  m_PreviousShadowCastingSource: 0
-  m_PreviousShadowShape2DSource: {fileID: 0}
-  references:
-    version: 2
-    RefIds:
-    - rid: -2
-      type: {class: , ns: , asm: }

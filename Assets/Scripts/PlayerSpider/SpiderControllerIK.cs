@@ -344,6 +344,12 @@ public class SpiderControllerIK : MonoBehaviour
     //  Raycasting
     // ───────────────────────────────────────────────────────────
 
+    // Helper to ignore the web we are currently placing so feet don't grip it functionally for the body
+    private bool IsActiveWebSegment(Transform t)
+    {
+        return t != null && shooter != null && shooter.IsPlacementMode && shooter.ActiveWebString != null && t.IsChildOf(shooter.ActiveWebString.transform);
+    }
+
     void PerformRaycasts()
     {
         leftPoints.Clear();
@@ -383,7 +389,10 @@ public class SpiderControllerIK : MonoBehaviour
                     if (hit.collider == null) continue;
 
                     float dist = Vector2.Distance(hit.point, origin);
-                    if (hit.collider.gameObject.layer == webLayer && dist < 1.0f)
+                    bool isWebLayer = hit.collider.gameObject.layer == webLayer;
+                    
+                    bool isRappelling = shooter != null && shooter.IsRappelling;
+                    if (isWebLayer && !isRappelling && dist < 1.0f)
                         continue;
 
                     if (hit.collider.gameObject.layer == dirtLayer && (hit.distance == 0f || Vector2.Dot(dir, hit.normal) > 0f))
@@ -438,7 +447,9 @@ public class SpiderControllerIK : MonoBehaviour
                         
                         // Allow webs even if they are very close to the head (overlap prevention)
                         bool isWeb = hit.collider.gameObject.layer == webLayer;
-                        if (!isWeb && distFromHead < 1.0f)
+                        bool isRappelling = shooter != null && shooter.IsRappelling;
+                        
+                        if (!isWeb && !isRappelling && distFromHead < 1.0f)
                             continue;
 
                         if (hit.collider.gameObject.layer == dirtLayer && (hit.distance == 0f || Vector2.Dot(dir, hit.normal) > 0f))
@@ -459,6 +470,7 @@ public class SpiderControllerIK : MonoBehaviour
         for (int i = 0; i < overlapCount; i++)
         {
             Collider2D col = overlapBuffer[i];
+            if (col == null) continue;
             
             // To drastically improve performance, use the segment's closest point 
             // instead of generating multiple virtual sample points along the array.
@@ -502,8 +514,25 @@ public class SpiderControllerIK : MonoBehaviour
 
     void ProcessGait()
     {
+        PlantAirborneLegs();
+        
         if (activeGait == GaitType.Urgency) UrgencyGait();
         else AlternateGait();
+    }
+
+    void PlantAirborneLegs()
+    {
+        foreach (var leg in legs)
+        {
+            if (!leg.isPlanted && !leg.isStepping && !leg.isDigStriking && !leg.isSparring)
+            {
+                if (HasValidTarget(leg))
+                {
+                    StepLeg(leg);
+                    lastSteppedIndex = System.Array.IndexOf(legs, leg);
+                }
+            }
+        }
     }
 
     void UrgencyGait()
@@ -520,10 +549,18 @@ public class SpiderControllerIK : MonoBehaviour
                     lastSteppedIndex = System.Array.IndexOf(legs, leg);
                     return;
                 }
+                else if (shooter != null && shooter.IsPlacementMode)
+                {
+                    // "Trust the web": The leg reached the edge of a cliff and has nowhere to step.
+                    // Because we are anchored to a web strand, we can safely let go and dangle!
+                    leg.isPlanted = false;
+                    leg.plantedTransform = null;
+                }
             }
         }
 
-        if (DetachedCount() >= maxDetached) return;
+        bool isRappelling = shooter != null && shooter.IsRappelling;
+        if (!isRappelling && DetachedCount() >= maxDetached) return;
 
         int detachedL = 0, detachedR = 0;
         foreach (var l in legs)
@@ -542,8 +579,11 @@ public class SpiderControllerIK : MonoBehaviour
         {
             if (!leg.isPlanted || leg.isStepping || leg.isDigStriking || leg.isSparring) continue;
 
-            if (leg.isPhysicallyRight && detachedR >= Mathf.CeilToInt(maxDetached / 2f)) continue;
-            if (!leg.isPhysicallyRight && detachedL >= Mathf.CeilToInt(maxDetached / 2f)) continue;
+            if (!isRappelling)
+            {
+                if (leg.isPhysicallyRight && detachedR >= Mathf.CeilToInt(maxDetached / 2f)) continue;
+                if (!leg.isPhysicallyRight && detachedL >= Mathf.CeilToInt(maxDetached / 2f)) continue;
+            }
 
             float u = Urgency(leg);
             if (u > maxUrg)
@@ -552,6 +592,14 @@ public class SpiderControllerIK : MonoBehaviour
                 {
                     maxUrg = u;
                     best = leg;
+                }
+                else if (u > 1.5f && shooter != null && shooter.IsPlacementMode)
+                {
+                    // If urgency is very high but there's NO valid step target (e.g. edge of a cliff),
+                    // normally the spider gets frozen forever via IK posSum math. 
+                    // Trust the web: safely let go of the foot so we can detach and drop naturally!
+                    leg.isPlanted = false;
+                    leg.plantedTransform = null;
                 }
             }
         }
@@ -565,14 +613,24 @@ public class SpiderControllerIK : MonoBehaviour
 
     void AlternateGait()
     {
-        if (DetachedCount() >= maxDetached) return;
+        bool isRappelling = shooter != null && shooter.IsRappelling;
+        if (!isRappelling && DetachedCount() >= maxDetached) return;
 
         var leg = legs[nextLegIndex];
 
         if (leg.isPlanted && !leg.isStepping && Urgency(leg) > 1f)
         {
-            StepLeg(leg);
-            nextLegIndex = (nextLegIndex + 1) % legs.Length;
+            if (HasValidTarget(leg))
+            {
+                StepLeg(leg);
+                nextLegIndex = (nextLegIndex + 1) % legs.Length;
+            }
+            else if (Urgency(leg) > 1.5f && shooter != null && shooter.IsPlacementMode)
+            {
+                leg.isPlanted = false;
+                leg.plantedTransform = null;
+                nextLegIndex = (nextLegIndex + 1) % legs.Length;
+            }
         }
     }
 
@@ -580,6 +638,17 @@ public class SpiderControllerIK : MonoBehaviour
     {
         int idx = System.Array.IndexOf(legs, leg);
         if (idx < 0 || restingFootOffsets == null) return 0f;
+
+        bool isRappelling = shooter != null && shooter.IsRappelling;
+
+        float ext = leg.GetExtension() / legExtensionMax;
+        float extensionUrgency = (ext > 0.9f) ? (ext - 0.9f) * 10f : 0f;
+
+        // If rappelling, the ONLY reason to let go is if the string physically slides out of reach
+        if (isRappelling)
+        {
+            return extensionUrgency;
+        }
 
         Vector2 avgPlantedCenter = Vector2.zero;
         int plantedCount = 0;
@@ -594,9 +663,7 @@ public class SpiderControllerIK : MonoBehaviour
         float distFromIdeal = Vector2.Distance(leg.currentFootPos, idealPos);
         float idealUrgency = distFromIdeal / (maxReach * 0.7f);
 
-        float ext = leg.GetExtension() / legExtensionMax;
         float minExt = leg.GetExtension() / legExtensionMin;
-        float extensionUrgency = (ext > 0.9f) ? (ext - 0.9f) * 10f : 0f;
         if (minExt < 1.1f) extensionUrgency += (1.1f - minExt) * 2f;
 
         float rhythmUrgency = 0f;
@@ -643,7 +710,22 @@ public class SpiderControllerIK : MonoBehaviour
     AttachmentPoint GetBestPoint(SpiderLegIK leg)
     {
         int idx = System.Array.IndexOf(legs, leg);
-        List<AttachmentPoint> pool = leg.isPhysicallyRight ? rightPoints : leftPoints;
+        
+        bool isRappelling = shooter != null && shooter.IsRappelling;
+
+        // When rappelling, the web strand acts as a very thin vertical pole that might exist
+        // entirely on one side of the origin. Allow legs to grab points on the opposite side!
+        List<AttachmentPoint> pool = new List<AttachmentPoint>();
+        if (isRappelling)
+        {
+            pool.AddRange(leftPoints);
+            pool.AddRange(rightPoints);
+        }
+        else
+        {
+            pool.AddRange(leg.isPhysicallyRight ? rightPoints : leftPoints);
+        }
+        
         if (pool.Count == 0) return new AttachmentPoint { isValid = false };
 
         Vector2 avgPlantedCenter = Vector2.zero;
@@ -654,8 +736,21 @@ public class SpiderControllerIK : MonoBehaviour
         Vector2 headPos = headRb != null ? headRb.position : (Vector2)headT.position;
 
         float maxReach = leg.thighLength + leg.shinLength;
-        Vector2 idealPos = avgPlantedCenter + (Vector2)(headT.rotation * restingFootOffsets[idx])
-                         + smoothedInput * maxReach * 0.4f;
+        Vector2 idealPos = avgPlantedCenter + (Vector2)(headT.rotation * restingFootOffsets[idx]);
+
+        // If rappelling, legs shouldn't bias downwards based on user input, because the rope we want 
+        // to grab is actually spawning above/around us as we fall.
+        if (!isRappelling)
+        {
+            idealPos += smoothedInput * maxReach * 0.4f;
+        }
+        else
+        {
+            // Rappelling aesthetic: As the strand slides away, reach ~MinStride distance towards
+            // the spider's head to sequentially 'climb' the rope upwards, resolving the empty-space deadlock.
+            Vector2 towardsHead = (headPos - leg.currentFootPos).normalized;
+            idealPos = leg.currentFootPos + towardsHead * (minStride * 1.5f);
+        }
 
         float comfortZone = maxReach * 0.9f;
         AttachmentPoint best = new AttachmentPoint { isValid = false };
@@ -668,14 +763,18 @@ public class SpiderControllerIK : MonoBehaviour
             float distFromHead = Vector2.Distance(headPos, ap.point);
             bool isWeb = ap.collider != null && ap.collider.gameObject.layer == webLayer;
 
-            if (distFromHead > legExtensionMax || distFromHead < legExtensionMin) continue;
+            if (distFromHead > legExtensionMax) continue;
 
-            float effectSafeArea = isWeb ? headSafeArea * 0.5f : headSafeArea;
-            if (distFromHead < effectSafeArea) continue;
+            if (!isRappelling)
+            {
+                if (distFromHead < legExtensionMin) continue;
+                float effectSafeArea = isWeb ? headSafeArea * 0.5f : headSafeArea;
+                if (distFromHead < effectSafeArea) continue;
+            }
 
             if (IsPointTooCloseToOtherFeet(ap.point, leg)) continue;
 
-            if (!leg.isStepping && inputDirection.sqrMagnitude > 0.01f)
+            if (!isRappelling && !leg.isStepping && inputDirection.sqrMagnitude > 0.01f)
             {
                 if (Vector2.Distance(leg.currentFootPos, ap.point) < minStride * (isWeb ? 0.5f : 1.0f))
                     continue;
@@ -691,9 +790,9 @@ public class SpiderControllerIK : MonoBehaviour
 
             float sideBias = leg.isPhysicallyRight ? 1f : -1f;
             float sideMargin = isWeb ? -0.5f : 0.1f;
-            if (localX * sideBias < sideMargin) continue;
+            if (!isRappelling && localX * sideBias < sideMargin) continue;
 
-            if (smoothedInput.sqrMagnitude > 0.05f)
+            if (!isRappelling && smoothedInput.sqrMagnitude > 0.05f)
             {
                 Vector2 stepVec = (ap.point - leg.currentFootPos);
                 float progress = Vector2.Dot(stepVec, smoothedInput.normalized);
@@ -726,7 +825,19 @@ public class SpiderControllerIK : MonoBehaviour
 
     bool HasValidTarget(SpiderLegIK leg)
     {
-        List<AttachmentPoint> pool = leg.isPhysicallyRight ? rightPoints : leftPoints;
+        bool isRappelling = shooter != null && shooter.IsRappelling;
+        
+        List<AttachmentPoint> pool = new List<AttachmentPoint>();
+        if (isRappelling)
+        {
+            pool.AddRange(leftPoints);
+            pool.AddRange(rightPoints);
+        }
+        else
+        {
+            pool.AddRange(leg.isPhysicallyRight ? rightPoints : leftPoints);
+        }
+
         Vector2 inputNorm = smoothedInput.normalized;
         bool hasInput = smoothedInput.sqrMagnitude > 0.05f;
 
@@ -735,24 +846,31 @@ public class SpiderControllerIK : MonoBehaviour
         foreach (var ap in pool)
         {
             float distFromHead = Vector2.Distance(headRb.position, ap.point);
-            bool isWeb = ap.collider.gameObject.layer == webLayer;
+            bool isWeb = ap.collider != null && ap.collider.gameObject.layer == webLayer;
 
-            if (distFromHead > legExtensionMax || distFromHead < legExtensionMin) continue;
+            if (distFromHead > legExtensionMax) continue;
 
-            float effectSafeArea = isWeb ? headSafeArea * 0.5f : headSafeArea;
-            if (distFromHead < effectSafeArea) continue;
+            if (!isRappelling)
+            {
+                if (distFromHead < legExtensionMin) continue;
+                float effectSafeArea = isWeb ? headSafeArea * 0.5f : headSafeArea;
+                if (distFromHead < effectSafeArea) continue;
+            }
 
             float localX = headT.InverseTransformPoint(ap.point).x;
             float sideBias = leg.isPhysicallyRight ? 1f : -1f;
             float sideMargin = isWeb ? -0.5f : 0.1f;
-            if (localX * sideBias < sideMargin) continue;
+            if (!isRappelling && localX * sideBias < sideMargin) continue;
 
             if (IsPointTooCloseToOtherFeet(ap.point, leg)) continue;
 
-            float stepDist = Vector2.Distance(leg.currentFootPos, ap.point);
-            if (stepDist < minStride * (isWeb ? 0.5f : 1.0f)) continue;
+            if (!isRappelling && !leg.isStepping && inputDirection.sqrMagnitude > 0.01f)
+            {
+                float stepDist = Vector2.Distance(leg.currentFootPos, ap.point);
+                if (stepDist < minStride * (isWeb ? 0.5f : 1.0f)) continue;
+            }
 
-            if (hasInput)
+            if (!isRappelling && hasInput)
             {
                 float progress = Vector2.Dot(ap.point - leg.currentFootPos, inputNorm);
                 if (progress < 0.05f) continue;
@@ -1093,8 +1211,7 @@ public class SpiderControllerIK : MonoBehaviour
 
         foreach (var leg in legs)
         {
-            // Skip digging legs from body pose — they are mid-animation and would
-            // drag the body downward/underground
+            // Skip digging legs from body pose
             if (leg.isDigStriking || leg.isSparring) continue;
             if (!leg.isPlanted) continue;
 
@@ -1107,6 +1224,15 @@ public class SpiderControllerIK : MonoBehaviour
         if (planted == 0)
         {
             headRb.freezeRotation = false;
+
+            // ── Freefall Swinging ──
+            if (shooter != null && shooter.IsPlacementMode && inputDirection.sqrMagnitude > 0.01f)
+            {
+                // Horizontal swing force from input - toned down to just allow pendulum nudging
+                Vector2 swingForce = new Vector2(inputDirection.x, 0f) * headRb.mass * 1.5f;
+                headRb.AddForce(swingForce, ForceMode2D.Force);
+            }
+
             return;
         }
 
@@ -1291,7 +1417,16 @@ public class SpiderControllerIK : MonoBehaviour
 
         if (smoothedInput.sqrMagnitude > 0.01f)
         {
-            targetPos += (Vector2)smoothedInput * effectLead;
+            if (shooter != null && shooter.IsPlacementMode)
+            {
+                // Confident input: ignore groundFactor hesitancy. The spider inherently
+                // trusts its own web, so it confidently pushes targetPos over ledges.
+                targetPos += (Vector2)smoothedInput * (bodyLead + currentLeadOffset);
+            }
+            else
+            {
+                targetPos += (Vector2)smoothedInput * effectLead;
+            }
         }
 
         Vector2 toTarget = targetPos - headRb.position;
@@ -1306,14 +1441,52 @@ public class SpiderControllerIK : MonoBehaviour
         float currentSmoothing = (inputDirection.sqrMagnitude > 0.01f) ? surfaceSmoothing : surfaceSmoothing * 0.2f;
         currentSmoothing *= digDampen;
 
+        // ── Placement Mode: reduce body solver authority so web physics have influence ──
+        float webHangFactor = 1f;
+        if (shooter != null && shooter.IsPlacementMode)
+        {
+            if (shooter.IsRappelling)
+            {
+                // Restore some IK authority! If 0, the spider torso acts as a dead ragdoll held entirely by the tether joint. 
+                // At 0.4, the kinematic legs "cause" physics, pulling the torso towards their planted grip on the web, giving "cause and effect"
+                webHangFactor = 0.4f; 
+
+                // Horizontal swing force from input (same as freefall)
+                if (inputDirection.sqrMagnitude > 0.01f)
+                {
+                    Vector2 swingForce = new Vector2(inputDirection.x, 0f) * bodySmoothing * headRb.mass * 0.5f;
+                    headRb.AddForce(swingForce, ForceMode2D.Force);
+                }
+            }
+            else
+            {
+                // Scale down body solver control based on how many legs are on solid ground.
+                webHangFactor = Mathf.Lerp(0.1f, 0.8f, groundFactor);
+            }
+        }
+
         Vector2 gravityCancel = -Physics2D.gravity * headRb.gravityScale;
 
-        headRb.linearVelocity = Vector2.Lerp(headRb.linearVelocity, toTarget * currentSmoothing, Time.fixedDeltaTime * 10f);
-        headRb.AddForce(gravityCancel * headRb.mass, ForceMode2D.Force);
+        // During web hanging, reduce velocity override and gravity cancel so
+        // the spider swings naturally from the hinge joint.
+        headRb.linearVelocity = Vector2.Lerp(headRb.linearVelocity, toTarget * currentSmoothing, Time.fixedDeltaTime * 10f * webHangFactor);
+        headRb.AddForce(gravityCancel * headRb.mass * webHangFactor, ForceMode2D.Force);
 
         float effectiveRotSpeed = rotationSpeed * digDampen;
-        headT.rotation = Quaternion.Slerp(headT.rotation, stableRot, Time.fixedDeltaTime * effectiveRotSpeed);
-        headRb.freezeRotation = true;
+        if (webHangFactor < 0.5f)
+        {
+            // When mostly hanging, let rotation respond to physics more naturally
+            headRb.freezeRotation = false;
+            if (webHangFactor > 0.01f)
+            {
+                headRb.MoveRotation(Mathf.LerpAngle(headRb.rotation, stableRot.eulerAngles.z, Time.fixedDeltaTime * effectiveRotSpeed * webHangFactor));
+            }
+        }
+        else
+        {
+            headT.rotation = Quaternion.Slerp(headT.rotation, stableRot, Time.fixedDeltaTime * effectiveRotSpeed);
+            headRb.freezeRotation = true;
+        }
 
         if (spiderWeightMult > 0.01f && planted > 0)
         {
@@ -1451,6 +1624,8 @@ public class SpiderControllerIK : MonoBehaviour
     void HandleWebManipulation()
     {
         if (shooter == null || !shooter.enabled) return;
+        // Placement mode trails from the body passively — don't steal a leg
+        if (shooter.IsPlacementMode) return;
 
         Vector2 mousePos = GetMouseWorldPos();
         float distToHead = Vector2.Distance(mousePos, headT.position);

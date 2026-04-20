@@ -409,8 +409,11 @@ public class SpiderLegIK : MonoBehaviour
             var targetRb = col.GetComponentInParent<Rigidbody2D>();
             if (targetRb != null && targetRb != controller.headRb)
             {
-                // Apply a significant push at the step point
-                targetRb.AddForceAtPosition(-normal * (controller.headRb.mass * 1.5f), worldTarget, ForceMode2D.Impulse);
+                if (targetRb.gameObject.layer != LayerMask.NameToLayer("Web"))
+                {
+                    // Apply a significant push at the step point
+                    targetRb.AddForceAtPosition(-normal * (controller.headRb.mass * 1.5f), worldTarget, ForceMode2D.Impulse);
+                }
             }
         }
 

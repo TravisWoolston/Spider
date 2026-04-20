@@ -12,6 +12,13 @@ public class WebStringRenderer : MonoBehaviour
     [Header("Visual Settings")]
     private float webWidth = 0.2f; // Slightly wider for better overlap
     public Color baseColor = Color.white;
+
+    /// <summary>
+    /// When set, the LineRenderer draws an extra trailing point at this
+    /// transform's position — used during placement mode to visually
+    /// connect the last segment to the spider body without gaps.
+    /// </summary>
+    [HideInInspector] public Transform trailingAnchor;
     
     private LineRenderer lineRenderer;
     private List<WebSegment> segments = new List<WebSegment>();
@@ -47,13 +54,23 @@ public class WebStringRenderer : MonoBehaviour
             RefreshSegments();
         }
 
-        if (segments.Count < 2) 
+        if (segments.Count < 1) 
         {
             lineRenderer.positionCount = 0;
             return;
         }
 
-        lineRenderer.positionCount = segments.Count + 2;
+        // Need at least 2 segments for normal rendering, but 1 is enough
+        // during placement mode where the trailing anchor closes the gap.
+        bool hasTrailing = (trailingAnchor != null);
+        if (segments.Count < 2 && !hasTrailing)
+        {
+            lineRenderer.positionCount = 0;
+            return;
+        }
+
+        // +2 for start/end anchors, +1 if trailing spider body point
+        lineRenderer.positionCount = segments.Count + 2 + (hasTrailing ? 1 : 0);
         
         // 1. First point tracks the ACTUAL physical connection point (to close visual gaps)
         Vector2 startPos;
@@ -84,6 +101,12 @@ public class WebStringRenderer : MonoBehaviour
             endPos = last.transform.TransformPoint(last.hinge.anchor);
 
         lineRenderer.SetPosition(segments.Count + 1, endPos);
+
+        // 4. Trailing anchor: draws from the last segment all the way to the spider body
+        if (hasTrailing)
+        {
+            lineRenderer.SetPosition(segments.Count + 2, trailingAnchor.position);
+        }
 
         // Pulse Synchronization: Inherit the color from the first pulsing segment
         // This ensures the whole strand glows when the spider steps on it.

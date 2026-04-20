@@ -49,6 +49,8 @@ public class CentipedeLegIK : MonoBehaviour
     public  Transform plantedTransform;
     public  Vector2 plantedLocalPos;
     private Rigidbody2D plantedRb;
+    private WebVerletStrand plantedVerletStrand;
+    private float plantedVerletDistance;
 
     private CentipedeIK controller;
     private bool useLimbSolver;
@@ -380,17 +382,7 @@ public class CentipedeLegIK : MonoBehaviour
         lerpedStepTarget = worldTarget;
         lerpedStepNormal = normal;
         
-        // Clear old plant data
-        plantedTransform = col != null ? col.transform : null;
-        if (plantedTransform != null)
-        {
-            plantedRb = col.GetComponentInParent<Rigidbody2D>();
-            plantedLocalPos = plantedTransform.InverseTransformPoint(worldTarget);
-        }
-        else
-        {
-            plantedRb = null;
-        }
+        SetPlantTracking(col, worldTarget);
 
         StartCoroutine(StepCoroutine());
     }
@@ -404,14 +396,11 @@ public class CentipedeLegIK : MonoBehaviour
         // CRITICAL: Update the tracking data so SyncToSurface doesn't overwrite this reactive adjustment
         if (col != null)
         {
-            plantedTransform = col.transform;
-            plantedRb = col.GetComponentInParent<Rigidbody2D>();
-            plantedLocalPos = plantedTransform.InverseTransformPoint(worldTarget);
+            SetPlantTracking(col, worldTarget);
         }
         else if (plantedTransform != null)
         {
-            // If the surface didn't change, just update the local anchor point on the current surface
-            plantedLocalPos = plantedTransform.InverseTransformPoint(worldTarget);
+            UpdatePlantTracking(worldTarget);
         }
     }
 
@@ -427,7 +416,11 @@ public class CentipedeLegIK : MonoBehaviour
             // If the target object is moving (like a sagging web), update our world target to follow it
             if (plantedTransform != null)
             {
-                currentStepTarget = plantedTransform.TransformPoint(plantedLocalPos);
+                currentStepTarget = GetTrackedPlantWorldPos();
+                if (plantedVerletStrand != null)
+                {
+                    currentStepNormal = plantedVerletStrand.GetNormalAtDistance(plantedVerletDistance);
+                }
             }
 
             // Smoothly transition the target/normal in mid-air
@@ -461,8 +454,8 @@ public class CentipedeLegIK : MonoBehaviour
         // Final snap to target object if it moved during the step
         if (plantedTransform != null)
         {
-            plantedLocalPos = plantedTransform.InverseTransformPoint(currentStepTarget);
-            currentFootPos = plantedTransform.TransformPoint(plantedLocalPos);
+            UpdatePlantTracking(currentStepTarget);
+            currentFootPos = GetTrackedPlantWorldPos();
 
             // Web Pulse Illumination: Trigger pulse when stepping on webs
             var web = plantedTransform.GetComponent<WebSegment>();
@@ -477,6 +470,48 @@ public class CentipedeLegIK : MonoBehaviour
     {
         float u = 1f - t;
         return u * u * a + 2f * u * t * b + t * t * c;
+    }
+
+    private void SetPlantTracking(Collider2D col, Vector2 worldTarget)
+    {
+        plantedTransform = col != null ? col.transform : null;
+        plantedVerletStrand = col != null ? col.GetComponent<WebVerletStrand>() : null;
+        plantedVerletDistance = 0f;
+
+        if (plantedTransform != null)
+        {
+            plantedRb = col.GetComponentInParent<Rigidbody2D>();
+            plantedLocalPos = plantedTransform.InverseTransformPoint(worldTarget);
+            if (plantedVerletStrand != null)
+            {
+                plantedVerletDistance = plantedVerletStrand.GetDistanceAtPoint(worldTarget);
+            }
+        }
+        else
+        {
+            plantedRb = null;
+        }
+    }
+
+    private void UpdatePlantTracking(Vector2 worldTarget)
+    {
+        if (plantedTransform == null) return;
+
+        plantedLocalPos = plantedTransform.InverseTransformPoint(worldTarget);
+        if (plantedVerletStrand != null)
+        {
+            plantedVerletDistance = plantedVerletStrand.GetDistanceAtPoint(worldTarget);
+        }
+    }
+
+    private Vector2 GetTrackedPlantWorldPos()
+    {
+        if (plantedVerletStrand != null)
+        {
+            return plantedVerletStrand.GetPointAtDistance(plantedVerletDistance);
+        }
+
+        return plantedTransform != null ? plantedTransform.TransformPoint(plantedLocalPos) : currentFootPos;
     }
 
     // ───────────────────────────────────────────────────────────
@@ -501,8 +536,11 @@ public class CentipedeLegIK : MonoBehaviour
     {
         if (plantedTransform != null)
         {
-            // Update the world position based on the transform it's attached to
-            Vector2 newWorldPos = plantedTransform.TransformPoint(plantedLocalPos);
+            Vector2 newWorldPos = GetTrackedPlantWorldPos();
+            if (plantedVerletStrand != null)
+            {
+                plantedNormal = plantedVerletStrand.GetNormalAtDistance(plantedVerletDistance);
+            }
             
             if (isStepping)
             {

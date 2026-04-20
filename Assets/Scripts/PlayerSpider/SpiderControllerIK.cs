@@ -347,7 +347,67 @@ public class SpiderControllerIK : MonoBehaviour
     // Helper to ignore the web we are currently placing so feet don't grip it functionally for the body
     private bool IsActiveWebSegment(Transform t)
     {
-        return t != null && shooter != null && shooter.IsPlacementMode && shooter.ActiveWebString != null && t.IsChildOf(shooter.ActiveWebString.transform);
+        return t != null &&
+            shooter != null &&
+            shooter.IsPlacementMode &&
+            !shooter.IsRappelling &&
+            shooter.ActiveWebString != null &&
+            t.IsChildOf(shooter.ActiveWebString.transform);
+    }
+
+    private bool IsCurrentWebStringCollider(Collider2D col)
+    {
+        return col != null && shooter != null && shooter.ActiveWebString != null && col.transform.IsChildOf(shooter.ActiveWebString.transform);
+    }
+
+    private void AddAttachmentCandidate(Vector2 point, Vector2 normal, Collider2D col)
+    {
+        float localX = headT.InverseTransformPoint(point).x;
+        var ap = new AttachmentPoint(point, normal, col);
+        if (localX < 0) leftPoints.Add(ap);
+        else            rightPoints.Add(ap);
+    }
+
+    private void AddVerletAttachmentSamples(WebVerletStrand strand, Collider2D col, Vector2 origin)
+    {
+        if (strand == null || col == null || strand.PointCount < 2) return;
+
+        bool isRappelling = shooter != null && shooter.IsRappelling;
+        float centerDistance = strand.GetDistanceAtPoint(origin);
+        float spacing = Mathf.Max(0.25f, Mathf.Max(minStride * 0.75f, footSpacing * 0.5f));
+        int sampleRadius = isRappelling ? 4 : 2;
+
+        for (int i = -sampleRadius; i <= sampleRadius; i++)
+        {
+            float pathDistance = centerDistance + spacing * i;
+            if (pathDistance < 0f || pathDistance > strand.TotalLength) continue;
+
+            Vector2 point = strand.GetPointAtDistance(pathDistance);
+            if (Vector2.Distance(origin, point) > sightDistance) continue;
+
+            Vector2 normal = strand.GetNormalAtDistance(pathDistance);
+            Vector2 towardSpider = origin - point;
+            if (towardSpider.sqrMagnitude > 0.0001f && Vector2.Dot(normal, towardSpider) < 0f)
+            {
+                normal = -normal;
+            }
+
+            AddAttachmentCandidate(point, normal, col);
+        }
+    }
+
+    private void ReleaseFeetFromActivePlacementWeb()
+    {
+        if (shooter == null || !shooter.IsPlacementMode || shooter.IsRappelling || shooter.ActiveWebString == null) return;
+
+        foreach (var leg in legs)
+        {
+            if (leg == null || leg.plantedTransform == null) continue;
+            if (!IsActiveWebSegment(leg.plantedTransform)) continue;
+
+            leg.isPlanted = false;
+            leg.ClearPlantTracking();
+        }
     }
 
     void PerformRaycasts()
@@ -387,6 +447,7 @@ public class SpiderControllerIK : MonoBehaviour
                 {
                     var hit = hitBuffer[j];
                     if (hit.collider == null) continue;
+                    if (IsActiveWebSegment(hit.collider.transform)) continue;
 
                     float dist = Vector2.Distance(hit.point, origin);
                     bool isWebLayer = hit.collider.gameObject.layer == webLayer;
@@ -398,11 +459,7 @@ public class SpiderControllerIK : MonoBehaviour
                     if (hit.collider.gameObject.layer == dirtLayer && (hit.distance == 0f || Vector2.Dot(dir, hit.normal) > 0f))
                         continue;
 
-                    float localX = headT.InverseTransformPoint(hit.point).x;
-                    var ap = new AttachmentPoint(hit.point, hit.normal, hit.collider);
-
-                    if (localX < 0) leftPoints.Add(ap);
-                    else            rightPoints.Add(ap);
+                    AddAttachmentCandidate(hit.point, hit.normal, hit.collider);
                     
                     // Stop evaluating this ray ONLY if we hit a solid surface.
                     // If it's a web, keep looking for more web or ground behind it.
@@ -442,6 +499,7 @@ public class SpiderControllerIK : MonoBehaviour
                     {
                         var hit = hitBuffer[j];
                         if (hit.collider == null) continue;
+                        if (IsActiveWebSegment(hit.collider.transform)) continue;
 
                         float distFromHead = Vector2.Distance(hit.point, origin);
                         
@@ -455,10 +513,7 @@ public class SpiderControllerIK : MonoBehaviour
                         if (hit.collider.gameObject.layer == dirtLayer && (hit.distance == 0f || Vector2.Dot(dir, hit.normal) > 0f))
                             continue;
 
-                        float localX = headT.InverseTransformPoint(hit.point).x;
-                        var ap = new AttachmentPoint(hit.point, hit.normal, hit.collider);
-                        if (localX < 0) leftPoints.Add(ap);
-                        else            rightPoints.Add(ap);
+                        AddAttachmentCandidate(hit.point, hit.normal, hit.collider);
                     }
                 }
             }
@@ -471,15 +526,20 @@ public class SpiderControllerIK : MonoBehaviour
         {
             Collider2D col = overlapBuffer[i];
             if (col == null) continue;
+            if (IsActiveWebSegment(col.transform)) continue;
+
+            WebVerletStrand strand = col.GetComponent<WebVerletStrand>();
+            if (strand != null)
+            {
+                AddVerletAttachmentSamples(strand, col, origin);
+                continue;
+            }
             
             // To drastically improve performance, use the segment's closest point 
             // instead of generating multiple virtual sample points along the array.
             // With hundreds of segments, generating 8 virtual points per segment was causing O(n^2) frame drops.
             Vector2 pL = col.ClosestPoint(origin);
-            float localX = headT.InverseTransformPoint(pL).x;
-            var ap = new AttachmentPoint(pL, (origin - pL).normalized, col);
-            if (localX < 0) leftPoints.Add(ap);
-            else            rightPoints.Add(ap);
+            AddAttachmentCandidate(pL, (origin - pL).normalized, col);
         }
     }
 
@@ -514,6 +574,7 @@ public class SpiderControllerIK : MonoBehaviour
 
     void ProcessGait()
     {
+        ReleaseFeetFromActivePlacementWeb();
         PlantAirborneLegs();
         
         if (activeGait == GaitType.Urgency) UrgencyGait();
@@ -1498,7 +1559,13 @@ public class SpiderControllerIK : MonoBehaviour
                 if (leg.isPlanted && leg.plantedTransform != null)
                 {
                     Rigidbody2D targetRb = leg.plantedTransform.GetComponentInParent<Rigidbody2D>();
-                    if (targetRb != null && targetRb != headRb)
+                    WebVerletStrand targetStrand = leg.plantedTransform.GetComponent<WebVerletStrand>();
+                    if (targetStrand != null)
+                    {
+                        float strandDistance = targetStrand.GetDistanceAtPoint(leg.currentFootPos);
+                        targetStrand.AddForceAtDistance(strandDistance, weightDir * weightPerLeg, Mathf.Max(0.5f, minStride));
+                    }
+                    else if (targetRb != null && targetRb != headRb)
                     {
                         targetRb.AddForceAtPosition(weightDir * weightPerLeg, leg.currentFootPos, ForceMode2D.Force);
                     }
@@ -1635,16 +1702,30 @@ public class SpiderControllerIK : MonoBehaviour
             manipulatorLeg = legs[0];
             isManipulating = true;
             manipulatorLeg.isPlanted = false;
+            manipulatorLeg.currentFootPos = shooter.GetHeldWebAnchorPosition();
 
-            if (shooter != null) shooter.SetTetherAnchor(manipulatorLeg.foot);
+            if (shooter != null)
+            {
+                shooter.SetTetherAnchor(manipulatorLeg.foot);
+                shooter.SetTetherAnchorPosition(manipulatorLeg.currentFootPos);
+            }
         }
 
         if (isManipulating)
         {
             manipulatorLeg.currentFootPos = Vector2.Lerp(manipulatorLeg.currentFootPos, mousePos, Time.deltaTime * 20f);
             manipulatorLeg.isPlanted = false;
+            if (shooter != null) shooter.SetTetherAnchorPosition(manipulatorLeg.currentFootPos);
 
-            Collider2D col = Physics2D.OverlapCircle(manipulatorLeg.currentFootPos, 0.5f, attachableLayers | LayerMask.GetMask("Web"));
+            Collider2D col = null;
+            int overlapCount = Physics2D.OverlapCircleNonAlloc(manipulatorLeg.currentFootPos, 0.5f, overlapBuffer, attachableLayers | LayerMask.GetMask("Web"));
+            for (int i = 0; i < overlapCount; i++)
+            {
+                Collider2D candidate = overlapBuffer[i];
+                if (candidate == null || IsCurrentWebStringCollider(candidate)) continue;
+                col = candidate;
+                break;
+            }
 
             int webLayer = LayerMask.NameToLayer("Web");
             bool shouldStick = false;
@@ -1653,8 +1734,12 @@ public class SpiderControllerIK : MonoBehaviour
                 if (col.gameObject.layer == webLayer)
                 {
                     WebSegment otherWs = col.GetComponent<WebSegment>();
-                    if (otherWs != null && otherWs.stringId != shooter.stringId)
+                    WebVerletStrand otherVerlet = col.GetComponent<WebVerletStrand>();
+                    if ((otherWs != null && otherWs.stringId != shooter.stringId) ||
+                        (otherVerlet != null && otherVerlet.stringId != shooter.stringId))
+                    {
                         shouldStick = true;
+                    }
                 }
                 else
                 {

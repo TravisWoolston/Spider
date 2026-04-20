@@ -1710,7 +1710,13 @@ public class CentipedeIK : MonoBehaviour
                 if (leg.isPlanted && leg.plantedTransform != null)
                 {
                     Rigidbody2D targetRb = leg.plantedTransform.GetComponentInParent<Rigidbody2D>();
-                    if (targetRb != null && targetRb != headRb)
+                    WebVerletStrand targetStrand = leg.plantedTransform.GetComponent<WebVerletStrand>();
+                    if (targetStrand != null)
+                    {
+                        float strandDistance = targetStrand.GetDistanceAtPoint(leg.currentFootPos);
+                        targetStrand.AddForceAtDistance(strandDistance, weightDir * weightPerLeg, Mathf.Max(0.5f, minStride));
+                    }
+                    else if (targetRb != null && targetRb != headRb)
                     {
                         targetRb.AddForceAtPosition(weightDir * weightPerLeg, leg.currentFootPos, ForceMode2D.Force);
                     }

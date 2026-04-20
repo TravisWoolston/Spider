@@ -51,6 +51,8 @@ public class SpiderLegIK : MonoBehaviour
     public  Transform plantedTransform;
     private Vector2 plantedLocalPos;
     private Rigidbody2D plantedRb;
+    private WebVerletStrand plantedVerletStrand;
+    private float plantedVerletDistance;
 
     private SpiderControllerIK controller;
     private bool useLimbSolver;
@@ -430,17 +432,7 @@ public class SpiderLegIK : MonoBehaviour
         lerpedStepTarget = worldTarget;
         lerpedStepNormal = normal;
         
-        // Clear old plant data
-        plantedTransform = col != null ? col.transform : null;
-        if (plantedTransform != null)
-        {
-            plantedRb = col.GetComponentInParent<Rigidbody2D>();
-            plantedLocalPos = plantedTransform.InverseTransformPoint(worldTarget);
-        }
-        else
-        {
-            plantedRb = null;
-        }
+        SetPlantTracking(col, worldTarget);
 
         StartCoroutine(StepCoroutine());
     }
@@ -454,14 +446,11 @@ public class SpiderLegIK : MonoBehaviour
         // CRITICAL: Update the tracking data so SyncToSurface doesn't overwrite this reactive adjustment
         if (col != null)
         {
-            plantedTransform = col.transform;
-            plantedRb = col.GetComponentInParent<Rigidbody2D>();
-            plantedLocalPos = plantedTransform.InverseTransformPoint(worldTarget);
+            SetPlantTracking(col, worldTarget);
         }
         else if (plantedTransform != null)
         {
-            // If the surface didn't change, just update the local anchor point on the current surface
-            plantedLocalPos = plantedTransform.InverseTransformPoint(worldTarget);
+            UpdatePlantTracking(worldTarget);
         }
     }
 
@@ -477,7 +466,11 @@ public class SpiderLegIK : MonoBehaviour
             // If the target object is moving (like a sagging web), update our world target to follow it
             if (plantedTransform != null)
             {
-                currentStepTarget = plantedTransform.TransformPoint(plantedLocalPos);
+                currentStepTarget = GetTrackedPlantWorldPos();
+                if (plantedVerletStrand != null)
+                {
+                    currentStepNormal = plantedVerletStrand.GetNormalAtDistance(plantedVerletDistance);
+                }
             }
 
             // Smoothly transition the target/normal in mid-air
@@ -511,8 +504,8 @@ public class SpiderLegIK : MonoBehaviour
         // Final snap to target object if it moved during the step
         if (plantedTransform != null)
         {
-            plantedLocalPos = plantedTransform.InverseTransformPoint(currentStepTarget);
-            currentFootPos = plantedTransform.TransformPoint(plantedLocalPos);
+            UpdatePlantTracking(currentStepTarget);
+            currentFootPos = GetTrackedPlantWorldPos();
 
             // Web Pulse Illumination: Trigger pulse when stepping on webs
             var web = plantedTransform.GetComponent<WebSegment>();
@@ -527,6 +520,56 @@ public class SpiderLegIK : MonoBehaviour
     {
         float u = 1f - t;
         return u * u * a + 2f * u * t * b + t * t * c;
+    }
+
+    private void SetPlantTracking(Collider2D col, Vector2 worldTarget)
+    {
+        plantedTransform = col != null ? col.transform : null;
+        plantedVerletStrand = col != null ? col.GetComponent<WebVerletStrand>() : null;
+        plantedVerletDistance = 0f;
+
+        if (plantedTransform != null)
+        {
+            plantedRb = col.GetComponentInParent<Rigidbody2D>();
+            plantedLocalPos = plantedTransform.InverseTransformPoint(worldTarget);
+            if (plantedVerletStrand != null)
+            {
+                plantedVerletDistance = plantedVerletStrand.GetDistanceAtPoint(worldTarget);
+            }
+        }
+        else
+        {
+            plantedRb = null;
+        }
+    }
+
+    private void UpdatePlantTracking(Vector2 worldTarget)
+    {
+        if (plantedTransform == null) return;
+
+        plantedLocalPos = plantedTransform.InverseTransformPoint(worldTarget);
+        if (plantedVerletStrand != null)
+        {
+            plantedVerletDistance = plantedVerletStrand.GetDistanceAtPoint(worldTarget);
+        }
+    }
+
+    private Vector2 GetTrackedPlantWorldPos()
+    {
+        if (plantedVerletStrand != null)
+        {
+            return plantedVerletStrand.GetPointAtDistance(plantedVerletDistance);
+        }
+
+        return plantedTransform != null ? plantedTransform.TransformPoint(plantedLocalPos) : currentFootPos;
+    }
+
+    public void ClearPlantTracking()
+    {
+        plantedTransform = null;
+        plantedRb = null;
+        plantedVerletStrand = null;
+        plantedVerletDistance = 0f;
     }
 
     // ───────────────────────────────────────────────────────────
@@ -553,6 +596,7 @@ public class SpiderLegIK : MonoBehaviour
         // back to the old attachment point when we replant
         plantedTransform = null;
         plantedRb = null;
+        plantedVerletStrand = null;
 
         Vector2 startPos = currentFootPos;
 
@@ -719,6 +763,7 @@ public class SpiderLegIK : MonoBehaviour
         {
             plantedTransform = null;
             plantedRb = null;
+            plantedVerletStrand = null;
         }
 
         // Compute the shoulder position for the thrust line
@@ -920,7 +965,11 @@ public class SpiderLegIK : MonoBehaviour
         if (isHolding) return;
 
         // ── Normal surface tracking ──
-        Vector2 newWorldPos = plantedTransform.TransformPoint(plantedLocalPos);
+        Vector2 newWorldPos = GetTrackedPlantWorldPos();
+        if (plantedVerletStrand != null)
+        {
+            plantedNormal = plantedVerletStrand.GetNormalAtDistance(plantedVerletDistance);
+        }
 
         if (isStepping)
         {
@@ -946,6 +995,7 @@ public class SpiderLegIK : MonoBehaviour
         isPlanted = false;
         plantedTransform = targetRb.transform;
         plantedRb = targetRb;
+        plantedVerletStrand = null;
         plantedLocalPos = targetRb.transform.InverseTransformPoint(currentFootPos);
 
         if (footHoldJoint != null)
@@ -978,6 +1028,7 @@ public class SpiderLegIK : MonoBehaviour
 
         plantedTransform = null;
         plantedRb = null;
+        plantedVerletStrand = null;
         isPlanted = false;
     }
 

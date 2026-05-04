@@ -940,10 +940,18 @@ public class SpiderLeg : MonoBehaviour
         footHinge.connectedBody = closestBody;
 
         // Trigger web pulse if attached to a web
-        WebSegment webSegment = closestBody.GetComponent<WebSegment>();
-        if (webSegment != null)
+        WebVerletStrand webStrand = closestBody.GetComponent<WebVerletStrand>();
+        if (webStrand != null)
         {
-            webSegment.TriggerPulse();
+            webStrand.TriggerPulse(footHinge.transform.position);
+        }
+        else
+        {
+            WebSegment webSegment = closestBody.GetComponent<WebSegment>();
+            if (webSegment != null)
+            {
+                webSegment.TriggerPulse();
+            }
         }
     }
         // Smoothly rotate legSegment2 to the desired angle

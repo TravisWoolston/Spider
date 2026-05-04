@@ -12,7 +12,7 @@ TagManager:
   - Legs
   - Water
   - UI
-  - Static Environment
+  - Dirt
   - Web
   - SpiderFoot
   - SpiderHead
@@ -24,7 +24,7 @@ TagManager:
   - 
   - 
   - Terrain_Background
-  - Dirt
+  - 
   - Terrain_Foreground
   - BackgroundImage
   - 
@@ -35,12 +35,15 @@ TagManager:
   - 
   - 
   - 
-  - 
+  - Static Environment
   - Centipede Body
   - Centipede Legs
   m_SortingLayers:
   - name: Default
     uniqueID: 0
+    locked: 0
+  - name: Dirt
+    uniqueID: 4163160747
     locked: 0
   - name: Terrain_Background
     uniqueID: 2052116867
@@ -54,11 +57,14 @@ TagManager:
   - name: Terrain_Foreground
     uniqueID: 1802299551
     locked: 0
+  - name: Web
+    uniqueID: 3683069529
+    locked: 0
   m_RenderingLayers:
   - Default
   - Terrain_Foreground
   - Terrain_Background
-  - Light Layer 3
+  - Dirt
   - Light Layer 4
   - Light Layer 5
   - Light Layer 6

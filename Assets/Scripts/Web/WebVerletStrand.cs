@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.Rendering.Universal;
 
 /// <summary>
 /// Lightweight web strand simulation using Verlet points instead of per-segment
@@ -23,6 +24,32 @@ public class WebVerletStrand : MonoBehaviour
         public bool IsAnchored => anchorTransform != null || anchorStrand != null || anchorWorld;
     }
 
+    private struct NeighborLink
+    {
+        public WebVerletStrand strand;
+        public float localDistance;
+        public float remoteDistance;
+    }
+
+    private struct ActivePulse
+    {
+        public int id;
+        public float originDistance;
+        public float previousDistance;
+        public float currentDistance;
+        public float direction;
+        public float strength;
+        public int lightIndex;
+        public float createdTime;
+    }
+
+    private struct PulseVisualSample
+    {
+        public float pathDistance;
+        public float strength;
+        public int lightIndex;
+    }
+
     [Header("Simulation")]
     public float segmentLength = 1f;
     [Min(1)] public int solverIterations = 6;
@@ -36,14 +63,46 @@ public class WebVerletStrand : MonoBehaviour
     public float colliderEdgeRadius = 0.05f;
     public Color baseColor = Color.white;
 
+    [Header("Web Light")]
+    public bool useWebLights = true;
+    public Color pulseColor = Color.white;
+    public float maxLightIntensity = 20.0f;
+    public float pulseTravelSpeed = 35.0f;
+    public float pulseDistanceFalloff = 0.035f;
+    public float shapeLightLength = 6.0f;
+    public float shapeLightWidth = 1.2f;
+    public float shapeLightFalloffSize = 1.0f;
+    [Range(0f, 1f)] public float shapeLightFalloffIntensity = 0.5f;
+    [Min(1)] public int maxActiveShapeLights = 32;
+
+    private float lightDimSpeed = 10.0f;
+    private float minPulseStrength = 0.03f;
+    private float pulseTrailSpacing = 2.0f;
+    private float pulseTrailFalloff = 0.45f;
+
     [HideInInspector] public int stringId = -1;
     [HideInInspector] public Transform trailingAnchor;
 
     private readonly List<VerletPoint> points = new List<VerletPoint>();
+    private readonly List<float> restLengths = new List<float>();
     private readonly List<Vector2> externalForces = new List<Vector2>();
+    private readonly List<NeighborLink> neighborLinks = new List<NeighborLink>();
+    private readonly List<ActivePulse> activePulses = new List<ActivePulse>();
+    private readonly List<PulseVisualSample> pulseVisualSamples = new List<PulseVisualSample>();
+    private readonly List<Light2D> pulseLights = new List<Light2D>();
+    private readonly List<Transform> pulseLightTransforms = new List<Transform>();
+    private readonly List<Vector3[]> pulseShapePaths = new List<Vector3[]>();
     private LineRenderer lineRenderer;
     private EdgeCollider2D edgeCollider;
+    private Light2D pulseLight;
+    private Transform pulseLightTransform;
     private Vector2[] colliderPoints = new Vector2[0];
+    private static int currentPulseId;
+    private int lastPulseId = -1;
+    private Vector2 lightAnchorPoint;
+    private bool disabledLegacyPulseWaves;
+    private bool webLightRuntimeBypassed;
+    private int[] allSortingLayerIds;
 
     public int PointCount => points.Count;
     public Vector2 FirstPointPosition => points.Count > 0 ? points[0].position : (Vector2)transform.position;
@@ -56,14 +115,63 @@ public class WebVerletStrand : MonoBehaviour
         return points[Mathf.Clamp(index, 0, points.Count - 1)].position;
     }
 
+    public float GetSegmentRestLength(int segmentIndex)
+    {
+        return GetRestLength(segmentIndex);
+    }
+
+    public void SetSegmentRestLength(int segmentIndex, float length)
+    {
+        if (segmentIndex < 0 || segmentIndex >= restLengths.Count) return;
+        restLengths[segmentIndex] = Mathf.Max(0.01f, length);
+    }
+
+    public float GetSegmentCurrentLength(int segmentIndex)
+    {
+        if (points.Count < 2) return 0f;
+
+        int index = Mathf.Clamp(segmentIndex, 0, points.Count - 2);
+        return Vector2.Distance(points[index].position, points[index + 1].position);
+    }
+
+    public Vector2 GetPointVelocity(int index)
+    {
+        if (points.Count == 0) return Vector2.zero;
+
+        int pointIndex = Mathf.Clamp(index, 0, points.Count - 1);
+        float dt = Mathf.Max(Time.fixedDeltaTime, 0.0001f);
+        return (points[pointIndex].position - points[pointIndex].previousPosition) / dt;
+    }
+
     void Awake()
     {
+        webLightRuntimeBypassed = !useWebLights;
         EnsureComponents();
+        if (webLightRuntimeBypassed)
+        {
+            ClearWebLightRuntimeState();
+        }
     }
 
     void FixedUpdate()
     {
         Simulate(Time.fixedDeltaTime);
+    }
+
+    void Update()
+    {
+        if (ShouldBypassWebLightRuntime())
+        {
+            if (!webLightRuntimeBypassed &&
+                (activePulses.Count > 0 || pulseVisualSamples.Count > 0 || pulseLights.Count > 0))
+            {
+                ClearWebLightRuntimeState();
+            }
+            return;
+        }
+
+        UpdatePulses();
+        UpdateLighting();
     }
 
     void LateUpdate()
@@ -93,10 +201,126 @@ public class WebVerletStrand : MonoBehaviour
         edgeCollider.edgeRadius = colliderEdgeRadius;
     }
 
+    public void ConfigureLighting(
+        bool enableLights,
+        float maxIntensity,
+        Color color,
+        float dimSpeed,
+        float travelSpeed,
+        float distanceFalloff,
+        float minimumStrength,
+        float shapeLength,
+        float shapeWidth,
+        float shapeFalloffSize,
+        float shapeFalloffIntensity,
+        int maxShapeLights,
+        float trailSpacing,
+        float trailFalloff)
+    {
+        if (webLightRuntimeBypassed)
+        {
+            useWebLights = false;
+            return;
+        }
+
+        useWebLights = enableLights;
+        if (!useWebLights)
+        {
+            ClearWebLightRuntimeState();
+            return;
+        }
+
+        maxLightIntensity = Mathf.Max(0f, maxIntensity);
+        pulseColor = color;
+        lightDimSpeed = Mathf.Max(0f, dimSpeed);
+        pulseTravelSpeed = Mathf.Max(0.01f, travelSpeed);
+        pulseDistanceFalloff = Mathf.Max(0f, distanceFalloff);
+        minPulseStrength = Mathf.Max(0.001f, minimumStrength);
+        shapeLightLength = Mathf.Max(0.01f, shapeLength);
+        shapeLightWidth = Mathf.Max(0.01f, shapeWidth);
+        shapeLightFalloffSize = Mathf.Max(0f, shapeFalloffSize);
+        shapeLightFalloffIntensity = Mathf.Clamp01(shapeFalloffIntensity);
+        maxActiveShapeLights = Mathf.Max(1, maxShapeLights);
+        pulseTrailSpacing = Mathf.Max(0f, trailSpacing);
+        pulseTrailFalloff = Mathf.Max(0f, trailFalloff);
+        RetireLightSlotsAboveLimit();
+
+        for (int i = 0; i < pulseLights.Count; i++)
+        {
+            ConfigurePulseLight(pulseLights[i]);
+        }
+    }
+
+    public void DisableWebLightingForRuntime()
+    {
+        webLightRuntimeBypassed = true;
+        useWebLights = false;
+        ClearWebLightRuntimeState();
+    }
+
+    private bool ShouldBypassWebLightRuntime()
+    {
+        return webLightRuntimeBypassed || !useWebLights;
+    }
+
+    private void ClearWebLightRuntimeState()
+    {
+        activePulses.Clear();
+        pulseVisualSamples.Clear();
+        DisablePulseLights();
+        DisableExistingPulseLightChildren();
+        if (lineRenderer != null)
+        {
+            SetLineSolidColor(baseColor);
+        }
+    }
+
+    private void RetireLightSlotsAboveLimit()
+    {
+        int maxSlots = Mathf.Max(1, maxActiveShapeLights);
+        for (int i = 0; i < activePulses.Count; i++)
+        {
+            ActivePulse pulse = activePulses[i];
+            if (pulse.lightIndex < maxSlots) continue;
+
+            pulse.lightIndex = -1;
+            activePulses[i] = pulse;
+        }
+
+        for (int i = maxSlots; i < pulseLights.Count; i++)
+        {
+            Light2D light = pulseLights[i];
+            if (light == null) continue;
+
+            light.intensity = Mathf.MoveTowards(light.intensity, 0f, lightDimSpeed * Time.deltaTime);
+            if (light.intensity <= 0.01f)
+            {
+                light.intensity = 0f;
+                light.enabled = false;
+            }
+        }
+    }
+
+    private void DisableExistingPulseLightChildren()
+    {
+        for (int i = 0; i < transform.childCount; i++)
+        {
+            Transform child = transform.GetChild(i);
+            if (child == null || !child.name.StartsWith("PulseLight")) continue;
+
+            Light2D light = child.GetComponent<Light2D>();
+            if (light == null) continue;
+
+            light.intensity = 0f;
+            light.enabled = false;
+        }
+    }
+
     public void BuildLine(Vector2 start, Vector2 end, int pointCount)
     {
         EnsureComponents();
         points.Clear();
+        restLengths.Clear();
         externalForces.Clear();
 
         int count = Mathf.Max(2, pointCount);
@@ -113,6 +337,7 @@ public class WebVerletStrand : MonoBehaviour
     {
         EnsureComponents();
         points.Clear();
+        restLengths.Clear();
         externalForces.Clear();
         AddPoint(position);
         UpdateVisualsAndCollider();
@@ -126,6 +351,11 @@ public class WebVerletStrand : MonoBehaviour
 
     public void PrependPoint(Vector2 position)
     {
+        if (points.Count > 0)
+        {
+            restLengths.Insert(0, Mathf.Max(0.01f, Vector2.Distance(position, points[0].position)));
+        }
+
         points.Insert(0, CreatePoint(position));
         externalForces.Insert(0, Vector2.zero);
         UpdateVisualsAndCollider();
@@ -140,6 +370,18 @@ public class WebVerletStrand : MonoBehaviour
         else
         {
             int insertIndex = Mathf.Max(0, points.Count - 1);
+            if (points.Count >= 2)
+            {
+                Vector2 previous = points[insertIndex - 1].position;
+                Vector2 end = points[insertIndex].position;
+                restLengths[insertIndex - 1] = Mathf.Max(0.01f, Vector2.Distance(previous, position));
+                restLengths.Insert(insertIndex, Mathf.Max(0.01f, Vector2.Distance(position, end)));
+            }
+            else
+            {
+                restLengths.Add(Mathf.Max(0.01f, Vector2.Distance(points[0].position, position)));
+            }
+
             points.Insert(insertIndex, CreatePoint(position));
             externalForces.Insert(insertIndex, Vector2.zero);
         }
@@ -199,6 +441,134 @@ public class WebVerletStrand : MonoBehaviour
             if (i != 0 && i != points.Count - 1 && i % step != 0) continue;
             GlobalAttachmentManager.StoreAttachmentPoint(points[i].position, EstimateNormal(i), transform, overrideMinDist);
         }
+    }
+
+    public void MarkSensed(int frame)
+    {
+        MarkSensedAt(LastPointPosition, frame);
+    }
+
+    public void MarkSensedAt(Vector2 worldPoint, int frame)
+    {
+        if (ShouldBypassWebLightRuntime()) return;
+
+        if (!TryGetClosestDistanceOnPath(worldPoint, out _, out Vector2 closestPoint))
+        {
+            return;
+        }
+
+        lightAnchorPoint = closestPoint;
+    }
+
+    public void TriggerPulse()
+    {
+        TriggerPulse(LastPointPosition);
+    }
+
+    public void TriggerPulse(Vector2 worldPoint)
+    {
+        if (ShouldBypassWebLightRuntime()) return;
+
+        currentPulseId++;
+        Pulse(worldPoint, 1.0f, currentPulseId);
+    }
+
+    public void Pulse(Vector2 worldPoint, float strength, int pulseId)
+    {
+        if (ShouldBypassWebLightRuntime()) return;
+        if (lastPulseId == pulseId || strength <= 0.01f) return;
+
+        float pathDistance = GetDistanceAtPoint(worldPoint);
+        BeginPulse(pathDistance, strength, pulseId);
+    }
+
+    private void BeginPulse(float pathDistance, float strength, int pulseId)
+    {
+        if (ShouldBypassWebLightRuntime()) return;
+
+        lastPulseId = pulseId;
+        float clampedDistance = Mathf.Clamp(pathDistance, 0f, GetTotalLength());
+        lightAnchorPoint = GetPointAtDistance(clampedDistance);
+
+        activePulses.Add(CreatePulse(clampedDistance, -1f, strength, pulseId));
+        activePulses.Add(CreatePulse(clampedDistance, 1f, strength, pulseId));
+    }
+
+    private ActivePulse CreatePulse(float originDistance, float direction, float strength, int pulseId)
+    {
+        return new ActivePulse
+        {
+            id = pulseId,
+            originDistance = originDistance,
+            previousDistance = originDistance,
+            currentDistance = originDistance,
+            direction = Mathf.Sign(direction),
+            strength = strength,
+            lightIndex = ClaimPulseLightSlot(),
+            createdTime = Time.time
+        };
+    }
+
+    private int ClaimPulseLightSlot()
+    {
+        int maxSlots = Mathf.Max(1, maxActiveShapeLights);
+        int existingSlotCount = Mathf.Min(pulseLights.Count, maxSlots);
+
+        for (int i = 0; i < existingSlotCount; i++)
+        {
+            if (!IsLightSlotInUse(i))
+            {
+                return i;
+            }
+        }
+
+        if (pulseLights.Count < maxSlots)
+        {
+            EnsurePulseLightCapacity(pulseLights.Count + 1);
+            return pulseLights.Count - 1;
+        }
+
+        return StealOldestPulseLightSlot();
+    }
+
+    private bool IsLightSlotInUse(int lightIndex)
+    {
+        for (int i = 0; i < activePulses.Count; i++)
+        {
+            if (activePulses[i].lightIndex == lightIndex)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private int StealOldestPulseLightSlot()
+    {
+        int oldestPulseIndex = -1;
+        float oldestTime = float.MaxValue;
+
+        for (int i = 0; i < activePulses.Count; i++)
+        {
+            ActivePulse pulse = activePulses[i];
+            if (pulse.lightIndex < 0 || pulse.createdTime >= oldestTime) continue;
+
+            oldestTime = pulse.createdTime;
+            oldestPulseIndex = i;
+        }
+
+        if (oldestPulseIndex < 0)
+        {
+            return -1;
+        }
+
+        ActivePulse oldestPulse = activePulses[oldestPulseIndex];
+        int stolenLightIndex = oldestPulse.lightIndex;
+        oldestPulse.lightIndex = -1;
+        oldestPulse.strength = 0f;
+        activePulses[oldestPulseIndex] = oldestPulse;
+        return stolenLightIndex;
     }
 
     public float GetDistanceAtPoint(Vector2 worldPoint)
@@ -333,7 +703,7 @@ public class WebVerletStrand : MonoBehaviour
             float distance = delta.magnitude;
             if (distance < 0.0001f) continue;
 
-            float correctionFactor = (distance - segmentLength) / distance;
+            float correctionFactor = (distance - GetRestLength(i)) / distance;
             if (a.IsAnchored && b.IsAnchored)
             {
                 continue;
@@ -407,6 +777,35 @@ public class WebVerletStrand : MonoBehaviour
         points[index] = point;
     }
 
+    private void RegisterNeighbor(WebVerletStrand other, float localDistance, float remoteDistance)
+    {
+        if (other == null || other == this) return;
+
+        float mergeDistance = Mathf.Max(0.25f, segmentLength * 0.5f);
+        for (int i = 0; i < neighborLinks.Count; i++)
+        {
+            NeighborLink link = neighborLinks[i];
+            if (link.strand != other) continue;
+            if (Mathf.Abs(link.localDistance - localDistance) > mergeDistance ||
+                Mathf.Abs(link.remoteDistance - remoteDistance) > mergeDistance)
+            {
+                continue;
+            }
+
+            link.localDistance = localDistance;
+            link.remoteDistance = remoteDistance;
+            neighborLinks[i] = link;
+            return;
+        }
+
+        neighborLinks.Add(new NeighborLink
+        {
+            strand = other,
+            localDistance = localDistance,
+            remoteDistance = remoteDistance
+        });
+    }
+
     private void SetPointStrandAnchor(int index, WebVerletStrand strand, Vector2 worldPoint)
     {
         if (index < 0 || index >= points.Count || strand == null) return;
@@ -423,6 +822,10 @@ public class WebVerletStrand : MonoBehaviour
         point.anchorWorld = false;
         point.anchorWorldPosition = Vector2.zero;
         points[index] = point;
+
+        float localDistance = GetDistanceAtPoint(anchoredPosition);
+        RegisterNeighbor(strand, localDistance, distance);
+        strand.RegisterNeighbor(this, distance, localDistance);
     }
 
     private void SetPointWorldAnchor(int index, Vector2 worldPoint)
@@ -457,8 +860,21 @@ public class WebVerletStrand : MonoBehaviour
 
     private void AddPoint(Vector2 position)
     {
+        if (points.Count > 0)
+        {
+            restLengths.Add(Mathf.Max(0.01f, Vector2.Distance(points[points.Count - 1].position, position)));
+        }
+
         points.Add(CreatePoint(position));
         externalForces.Add(Vector2.zero);
+    }
+
+    private float GetRestLength(int segmentIndex)
+    {
+        if (segmentIndex >= 0 && segmentIndex < restLengths.Count)
+            return restLengths[segmentIndex];
+
+        return segmentLength;
     }
 
     private VerletPoint CreatePoint(Vector2 position)
@@ -536,6 +952,247 @@ public class WebVerletStrand : MonoBehaviour
         return true;
     }
 
+    private Vector2 GetClosestPointOnPath(Vector2 worldPoint)
+    {
+        TryGetClosestDistanceOnPath(worldPoint, out _, out Vector2 closestPoint);
+        return closestPoint;
+    }
+
+    private void UpdatePulses()
+    {
+        if (activePulses.Count == 0) return;
+
+        float length = GetTotalLength();
+        float travel = Mathf.Max(0.01f, pulseTravelSpeed) * Time.deltaTime;
+        for (int i = activePulses.Count - 1; i >= 0; i--)
+        {
+            ActivePulse pulse = activePulses[i];
+            pulse.previousDistance = pulse.currentDistance;
+            pulse.currentDistance += pulse.direction * travel;
+
+            PropagateCrossedLinks(pulse);
+
+            if (pulse.currentDistance < 0f ||
+                pulse.currentDistance > length ||
+                GetPulseStrengthAtDistance(pulse) < minPulseStrength)
+            {
+                activePulses.RemoveAt(i);
+                continue;
+            }
+
+            activePulses[i] = pulse;
+        }
+    }
+
+    private void PropagateCrossedLinks(ActivePulse pulse)
+    {
+        if (neighborLinks.Count == 0) return;
+
+        float from = Mathf.Min(pulse.previousDistance, pulse.currentDistance);
+        float to = Mathf.Max(pulse.previousDistance, pulse.currentDistance);
+        for (int i = 0; i < neighborLinks.Count; i++)
+        {
+            NeighborLink link = neighborLinks[i];
+            if (link.strand == null) continue;
+            if (link.localDistance < from || link.localDistance > to) continue;
+
+            float propagatedStrength = GetPulseStrengthAtDistance(pulse) * 0.96f;
+            link.strand.ReceivePulseAtDistance(link.remoteDistance, propagatedStrength, pulse.id);
+        }
+    }
+
+    private void ReceivePulseAtDistance(float pathDistance, float strength, int pulseId)
+    {
+        if (ShouldBypassWebLightRuntime()) return;
+        if (lastPulseId == pulseId || strength <= 0.01f) return;
+        BeginPulse(pathDistance, strength, pulseId);
+    }
+
+    private float GetPulseStrengthAtDistance(ActivePulse pulse)
+    {
+        float distanceTravelled = Mathf.Abs(pulse.currentDistance - pulse.originDistance);
+        float falloff = Mathf.Exp(-Mathf.Max(0f, pulseDistanceFalloff) * distanceTravelled);
+        return pulse.strength * falloff;
+    }
+
+    private void UpdateLighting()
+    {
+        EnsureComponents();
+
+        if (!useWebLights)
+        {
+            DisablePulseLights();
+            SetLineSolidColor(baseColor);
+            return;
+        }
+
+        BuildPulseVisualSamples();
+        UpdatePulseShapeLights();
+        SetLineSolidColor(baseColor);
+    }
+
+    private void BuildPulseVisualSamples()
+    {
+        pulseVisualSamples.Clear();
+        if (activePulses.Count == 0) return;
+
+        float length = GetTotalLength();
+        if (length <= 0.001f) return;
+
+        int maxSamples = Mathf.Max(1, maxActiveShapeLights);
+        for (int i = 0; i < activePulses.Count && pulseVisualSamples.Count < maxSamples; i++)
+        {
+            ActivePulse pulse = activePulses[i];
+            if (pulse.lightIndex < 0) continue;
+            if (pulse.lightIndex >= maxSamples)
+            {
+                pulse.lightIndex = -1;
+                activePulses[i] = pulse;
+                continue;
+            }
+
+            float headStrength = GetPulseStrengthAtDistance(pulse);
+            if (headStrength < minPulseStrength) continue;
+
+            if (pulse.currentDistance < 0f || pulse.currentDistance > length) continue;
+
+            pulseVisualSamples.Add(new PulseVisualSample
+            {
+                pathDistance = pulse.currentDistance,
+                strength = headStrength,
+                lightIndex = pulse.lightIndex
+            });
+        }
+    }
+
+    private void UpdatePulseShapeLights()
+    {
+        for (int i = 0; i < pulseVisualSamples.Count; i++)
+        {
+            PulseVisualSample sample = pulseVisualSamples[i];
+            int lightIndex = sample.lightIndex;
+            if (lightIndex < 0 ||
+                lightIndex >= pulseLights.Count ||
+                lightIndex >= pulseLightTransforms.Count ||
+                lightIndex >= pulseShapePaths.Count)
+            {
+                continue;
+            }
+
+            Light2D light = pulseLights[lightIndex];
+            Transform lightTransform = pulseLightTransforms[lightIndex];
+            ConfigurePulseLight(light);
+            WritePulseShapeLight(light, lightTransform, pulseShapePaths[lightIndex], sample);
+
+            light.intensity = maxLightIntensity * sample.strength;
+            light.color = pulseColor;
+            light.enabled = true;
+        }
+
+        FadeUnusedPulseLights();
+    }
+
+    private void FadeUnusedPulseLights()
+    {
+        for (int i = 0; i < pulseLights.Count; i++)
+        {
+            if (IsLightSlotVisible(i)) continue;
+
+            Light2D light = pulseLights[i];
+            if (light == null) continue;
+
+            light.intensity = Mathf.MoveTowards(light.intensity, 0f, lightDimSpeed * Time.deltaTime);
+            if (light.intensity <= 0.01f)
+            {
+                light.intensity = 0f;
+                light.enabled = false;
+            }
+        }
+    }
+
+    private bool IsLightSlotVisible(int lightIndex)
+    {
+        for (int i = 0; i < pulseVisualSamples.Count; i++)
+        {
+            if (pulseVisualSamples[i].lightIndex == lightIndex)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private void DisablePulseLights()
+    {
+        for (int i = 0; i < pulseLights.Count; i++)
+        {
+            Light2D light = pulseLights[i];
+            if (light == null) continue;
+
+            light.intensity = 0f;
+            light.enabled = false;
+        }
+    }
+
+    private void WritePulseShapeLight(Light2D light, Transform lightTransform, Vector3[] shapePath, PulseVisualSample sample)
+    {
+        if (light == null || lightTransform == null || shapePath == null || shapePath.Length < 10) return;
+
+        float strandLength = GetTotalLength();
+        float lightLength = Mathf.Min(Mathf.Max(0.01f, shapeLightLength), Mathf.Max(0.01f, strandLength));
+        float halfLength = lightLength * 0.5f;
+        float halfWidth = Mathf.Max(0.01f, shapeLightWidth) * 0.5f * Mathf.Lerp(0.5f, 1f, Mathf.Clamp01(sample.strength));
+
+        WriteShapePoint(shapePath, 0, lightTransform, sample.pathDistance - halfLength, 0.08f, halfWidth, strandLength, 1f);
+        WriteShapePoint(shapePath, 1, lightTransform, sample.pathDistance - halfLength * 0.5f, 1.0f, halfWidth, strandLength, 1f);
+        WriteShapePoint(shapePath, 2, lightTransform, sample.pathDistance, 0.28f, halfWidth, strandLength, 1f);
+        WriteShapePoint(shapePath, 3, lightTransform, sample.pathDistance + halfLength * 0.5f, 1.0f, halfWidth, strandLength, 1f);
+        WriteShapePoint(shapePath, 4, lightTransform, sample.pathDistance + halfLength, 0.08f, halfWidth, strandLength, 1f);
+        WriteShapePoint(shapePath, 5, lightTransform, sample.pathDistance + halfLength, 0.08f, halfWidth, strandLength, -1f);
+        WriteShapePoint(shapePath, 6, lightTransform, sample.pathDistance + halfLength * 0.5f, 1.0f, halfWidth, strandLength, -1f);
+        WriteShapePoint(shapePath, 7, lightTransform, sample.pathDistance, 0.28f, halfWidth, strandLength, -1f);
+        WriteShapePoint(shapePath, 8, lightTransform, sample.pathDistance - halfLength * 0.5f, 1.0f, halfWidth, strandLength, -1f);
+        WriteShapePoint(shapePath, 9, lightTransform, sample.pathDistance - halfLength, 0.08f, halfWidth, strandLength, -1f);
+
+        light.SetShapePath(shapePath);
+    }
+
+    private void WriteShapePoint(
+        Vector3[] shapePath,
+        int index,
+        Transform lightTransform,
+        float pathDistance,
+        float widthScale,
+        float halfWidth,
+        float strandLength,
+        float side)
+    {
+        float clampedDistance = Mathf.Clamp(pathDistance, 0f, strandLength);
+        Vector2 center = GetPointAtDistance(clampedDistance);
+        Vector2 normal = GetNormalAtDistance(clampedDistance);
+        Vector2 worldPoint = center + normal * (halfWidth * widthScale * side);
+        shapePath[index] = lightTransform.InverseTransformPoint(worldPoint);
+    }
+
+    private void SetLineSolidColor(Color color)
+    {
+        Gradient gradient = new Gradient();
+        gradient.SetKeys(
+            new GradientColorKey[]
+            {
+                new GradientColorKey(color, 0f),
+                new GradientColorKey(color, 1f)
+            },
+            new GradientAlphaKey[]
+            {
+                new GradientAlphaKey(color.a, 0f),
+                new GradientAlphaKey(color.a, 1f)
+            }
+        );
+        lineRenderer.colorGradient = gradient;
+    }
+
     private void UpdateVisualsAndCollider()
     {
         EnsureComponents();
@@ -599,6 +1256,7 @@ public class WebVerletStrand : MonoBehaviour
             lineRenderer.numCornerVertices = 16;
             lineRenderer.startColor = baseColor;
             lineRenderer.endColor = baseColor;
+            lineRenderer.sortingLayerName = "Web";
 
             Shader litShader = Shader.Find("Universal Render Pipeline/2D/Sprite-Lit-Default");
             if (litShader != null)
@@ -613,5 +1271,103 @@ public class WebVerletStrand : MonoBehaviour
             edgeCollider.edgeRadius = colliderEdgeRadius;
             edgeCollider.enabled = false;
         }
+
+        DisableLegacyPulseWaveRenderers();
+    }
+
+    private void DisableLegacyPulseWaveRenderers()
+    {
+        if (disabledLegacyPulseWaves) return;
+        disabledLegacyPulseWaves = true;
+
+        for (int i = 0; i < transform.childCount; i++)
+        {
+            Transform child = transform.GetChild(i);
+            if (child == null || !child.name.StartsWith("PulseWave")) continue;
+
+            LineRenderer legacyRenderer = child.GetComponent<LineRenderer>();
+            if (legacyRenderer != null)
+            {
+                legacyRenderer.enabled = false;
+            }
+        }
+    }
+
+    private void EnsurePulseLightCapacity(int count)
+    {
+        int targetCount = Mathf.Max(0, count);
+        while (pulseLights.Count < targetCount)
+        {
+            int index = pulseLights.Count;
+            string lightName = index == 0 ? "PulseLight" : "PulseLight_" + index;
+            Transform existingLight = transform.Find(lightName);
+            Transform lightTransform;
+            if (existingLight == null)
+            {
+                GameObject lightObject = new GameObject(lightName);
+                lightObject.layer = gameObject.layer;
+                lightObject.transform.SetParent(transform);
+                lightObject.transform.position = transform.position;
+                lightTransform = lightObject.transform;
+            }
+            else
+            {
+                lightTransform = existingLight;
+                lightTransform.gameObject.layer = gameObject.layer;
+            }
+
+            Light2D light = lightTransform.GetComponent<Light2D>();
+            if (light == null)
+            {
+                light = lightTransform.gameObject.AddComponent<Light2D>();
+                light.lightType = Light2D.LightType.Freeform;
+            }
+
+            ConfigurePulseLight(light);
+            light.intensity = 0f;
+            light.enabled = false;
+
+            pulseLights.Add(light);
+            pulseLightTransforms.Add(lightTransform);
+            pulseShapePaths.Add(new Vector3[10]);
+
+            if (index == 0)
+            {
+                pulseLight = light;
+                pulseLightTransform = lightTransform;
+            }
+        }
+    }
+
+    private void ConfigurePulseLight(Light2D light)
+    {
+        if (light == null) return;
+
+        light.lightType = Light2D.LightType.Freeform;
+        light.shapeLightFalloffSize = shapeLightFalloffSize;
+        light.falloffIntensity = shapeLightFalloffIntensity;
+        light.color = pulseColor;
+        light.shadowsEnabled = false;
+        light.volumetricEnabled = false;
+        light.overlapOperation = Light2D.OverlapOperation.Additive;
+        if (light.targetSortingLayers == null || light.targetSortingLayers.Length != SortingLayer.layers.Length)
+        {
+            ApplyAllSortingLayers(light);
+        }
+    }
+
+    private void ApplyAllSortingLayers(Light2D light)
+    {
+        SortingLayer[] layers = SortingLayer.layers;
+        if (allSortingLayerIds == null || allSortingLayerIds.Length != layers.Length)
+        {
+            allSortingLayerIds = new int[layers.Length];
+            for (int i = 0; i < layers.Length; i++)
+            {
+                allSortingLayerIds[i] = layers[i].id;
+            }
+        }
+
+        light.targetSortingLayers = allSortingLayerIds;
     }
 }

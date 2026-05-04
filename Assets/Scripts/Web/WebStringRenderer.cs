@@ -34,6 +34,7 @@ public class WebStringRenderer : MonoBehaviour
         // Extra smoothness for attachment points
         lineRenderer.numCapVertices = 16;
         lineRenderer.numCornerVertices = 16;
+        lineRenderer.sortingLayerName = "Web";
 
         // Use a lit material so the web respects scene lighting and is hidden in darkness
         Shader litShader = Shader.Find("Universal Render Pipeline/2D/Sprite-Lit-Default");

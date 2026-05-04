@@ -419,13 +419,6 @@ public class SpiderLegIK : MonoBehaviour
             }
         }
 
-        // Web Pulse Illumination: Trigger pulse when targeting a web
-        if (col != null)
-        {
-            var web = col.GetComponent<WebSegment>();
-            if (web != null) web.TriggerPulse();
-        }
-
         currentStepTarget = worldTarget;
         currentStepNormal = normal;
         plantedNormal = normal;
@@ -508,12 +501,24 @@ public class SpiderLegIK : MonoBehaviour
             currentFootPos = GetTrackedPlantWorldPos();
 
             // Web Pulse Illumination: Trigger pulse when stepping on webs
-            var web = plantedTransform.GetComponent<WebSegment>();
-            if (web != null)
-            {
-                web.TriggerPulse();
-            }
+            Collider2D plantedCollider = plantedTransform.GetComponent<Collider2D>();
+            TriggerWebPulse(plantedCollider, currentFootPos);
         }
+    }
+
+    private void TriggerWebPulse(Collider2D col, Vector2 worldPoint)
+    {
+        if (col == null) return;
+
+        WebVerletStrand strand = col.GetComponent<WebVerletStrand>();
+        if (strand != null)
+        {
+            strand.TriggerPulse(worldPoint);
+            return;
+        }
+
+        WebSegment web = col.GetComponent<WebSegment>();
+        if (web != null) web.TriggerPulse();
     }
 
     static Vector2 Bezier(Vector2 a, Vector2 b, Vector2 c, float t)

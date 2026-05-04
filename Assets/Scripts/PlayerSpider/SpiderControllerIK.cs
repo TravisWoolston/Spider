@@ -213,7 +213,14 @@ public class SpiderControllerIK : MonoBehaviour
             {
                 if (leg.isPlanted && leg.plantedTransform != null)
                 {
-                    var ws = leg.plantedTransform.GetComponent<WebSegment>();
+                    WebVerletStrand strand = leg.plantedTransform.GetComponent<WebVerletStrand>();
+                    if (strand != null)
+                    {
+                        strand.MarkSensedAt(leg.currentFootPos, Time.frameCount);
+                        continue;
+                    }
+
+                    WebSegment ws = leg.plantedTransform.GetComponent<WebSegment>();
                     if (ws != null) ws.MarkSensed(Time.frameCount);
                 }
             }
@@ -620,8 +627,7 @@ public class SpiderControllerIK : MonoBehaviour
             }
         }
 
-        bool isRappelling = shooter != null && shooter.IsRappelling;
-        if (!isRappelling && DetachedCount() >= maxDetached) return;
+        if (DetachedCount() >= maxDetached) return;
 
         int detachedL = 0, detachedR = 0;
         foreach (var l in legs)
@@ -640,11 +646,8 @@ public class SpiderControllerIK : MonoBehaviour
         {
             if (!leg.isPlanted || leg.isStepping || leg.isDigStriking || leg.isSparring) continue;
 
-            if (!isRappelling)
-            {
-                if (leg.isPhysicallyRight && detachedR >= Mathf.CeilToInt(maxDetached / 2f)) continue;
-                if (!leg.isPhysicallyRight && detachedL >= Mathf.CeilToInt(maxDetached / 2f)) continue;
-            }
+            if (leg.isPhysicallyRight && detachedR >= Mathf.CeilToInt(maxDetached / 2f)) continue;
+            if (!leg.isPhysicallyRight && detachedL >= Mathf.CeilToInt(maxDetached / 2f)) continue;
 
             float u = Urgency(leg);
             if (u > maxUrg)
@@ -674,8 +677,7 @@ public class SpiderControllerIK : MonoBehaviour
 
     void AlternateGait()
     {
-        bool isRappelling = shooter != null && shooter.IsRappelling;
-        if (!isRappelling && DetachedCount() >= maxDetached) return;
+        if (DetachedCount() >= maxDetached) return;
 
         var leg = legs[nextLegIndex];
 
@@ -700,16 +702,8 @@ public class SpiderControllerIK : MonoBehaviour
         int idx = System.Array.IndexOf(legs, leg);
         if (idx < 0 || restingFootOffsets == null) return 0f;
 
-        bool isRappelling = shooter != null && shooter.IsRappelling;
-
         float ext = leg.GetExtension() / legExtensionMax;
         float extensionUrgency = (ext > 0.9f) ? (ext - 0.9f) * 10f : 0f;
-
-        // If rappelling, the ONLY reason to let go is if the string physically slides out of reach
-        if (isRappelling)
-        {
-            return extensionUrgency;
-        }
 
         Vector2 avgPlantedCenter = Vector2.zero;
         int plantedCount = 0;
@@ -774,8 +768,6 @@ public class SpiderControllerIK : MonoBehaviour
         
         bool isRappelling = shooter != null && shooter.IsRappelling;
 
-        // When rappelling, the web strand acts as a very thin vertical pole that might exist
-        // entirely on one side of the origin. Allow legs to grab points on the opposite side!
         List<AttachmentPoint> pool = new List<AttachmentPoint>();
         if (isRappelling)
         {
@@ -797,21 +789,9 @@ public class SpiderControllerIK : MonoBehaviour
         Vector2 headPos = headRb != null ? headRb.position : (Vector2)headT.position;
 
         float maxReach = leg.thighLength + leg.shinLength;
-        Vector2 idealPos = avgPlantedCenter + (Vector2)(headT.rotation * restingFootOffsets[idx]);
-
-        // If rappelling, legs shouldn't bias downwards based on user input, because the rope we want 
-        // to grab is actually spawning above/around us as we fall.
-        if (!isRappelling)
-        {
-            idealPos += smoothedInput * maxReach * 0.4f;
-        }
-        else
-        {
-            // Rappelling aesthetic: As the strand slides away, reach ~MinStride distance towards
-            // the spider's head to sequentially 'climb' the rope upwards, resolving the empty-space deadlock.
-            Vector2 towardsHead = (headPos - leg.currentFootPos).normalized;
-            idealPos = leg.currentFootPos + towardsHead * (minStride * 1.5f);
-        }
+        float inputReach = isRappelling ? 0.2f : 0.4f;
+        Vector2 idealPos = avgPlantedCenter + (Vector2)(headT.rotation * restingFootOffsets[idx])
+                         + smoothedInput * maxReach * inputReach;
 
         float comfortZone = maxReach * 0.9f;
         AttachmentPoint best = new AttachmentPoint { isValid = false };
@@ -826,16 +806,15 @@ public class SpiderControllerIK : MonoBehaviour
 
             if (distFromHead > legExtensionMax) continue;
 
-            if (!isRappelling)
-            {
-                if (distFromHead < legExtensionMin) continue;
-                float effectSafeArea = isWeb ? headSafeArea * 0.5f : headSafeArea;
-                if (distFromHead < effectSafeArea) continue;
-            }
+            float minReach = isWeb ? legExtensionMin * 0.35f : legExtensionMin;
+            if (distFromHead < minReach) continue;
+
+            float effectSafeArea = isWeb ? headSafeArea * 0.35f : headSafeArea;
+            if (distFromHead < effectSafeArea) continue;
 
             if (IsPointTooCloseToOtherFeet(ap.point, leg)) continue;
 
-            if (!isRappelling && !leg.isStepping && inputDirection.sqrMagnitude > 0.01f)
+            if (!leg.isStepping && inputDirection.sqrMagnitude > 0.01f)
             {
                 if (Vector2.Distance(leg.currentFootPos, ap.point) < minStride * (isWeb ? 0.5f : 1.0f))
                     continue;
@@ -851,7 +830,7 @@ public class SpiderControllerIK : MonoBehaviour
 
             float sideBias = leg.isPhysicallyRight ? 1f : -1f;
             float sideMargin = isWeb ? -0.5f : 0.1f;
-            if (!isRappelling && localX * sideBias < sideMargin) continue;
+            if ((!isRappelling || !isWeb) && localX * sideBias < sideMargin) continue;
 
             if (!isRappelling && smoothedInput.sqrMagnitude > 0.05f)
             {
@@ -911,21 +890,20 @@ public class SpiderControllerIK : MonoBehaviour
 
             if (distFromHead > legExtensionMax) continue;
 
-            if (!isRappelling)
-            {
-                if (distFromHead < legExtensionMin) continue;
-                float effectSafeArea = isWeb ? headSafeArea * 0.5f : headSafeArea;
-                if (distFromHead < effectSafeArea) continue;
-            }
+            float minReach = isWeb ? legExtensionMin * 0.35f : legExtensionMin;
+            if (distFromHead < minReach) continue;
+
+            float effectSafeArea = isWeb ? headSafeArea * 0.35f : headSafeArea;
+            if (distFromHead < effectSafeArea) continue;
 
             float localX = headT.InverseTransformPoint(ap.point).x;
             float sideBias = leg.isPhysicallyRight ? 1f : -1f;
             float sideMargin = isWeb ? -0.5f : 0.1f;
-            if (!isRappelling && localX * sideBias < sideMargin) continue;
+            if ((!isRappelling || !isWeb) && localX * sideBias < sideMargin) continue;
 
             if (IsPointTooCloseToOtherFeet(ap.point, leg)) continue;
 
-            if (!isRappelling && !leg.isStepping && inputDirection.sqrMagnitude > 0.01f)
+            if (!leg.isStepping && inputDirection.sqrMagnitude > 0.01f)
             {
                 float stepDist = Vector2.Distance(leg.currentFootPos, ap.point);
                 if (stepDist < minStride * (isWeb ? 0.5f : 1.0f)) continue;
@@ -1294,6 +1272,21 @@ public class SpiderControllerIK : MonoBehaviour
                 headRb.AddForce(swingForce, ForceMode2D.Force);
             }
 
+            if (shooter != null && shooter.IsRappelling)
+            {
+                Vector2 gravityUp = Physics2D.gravity.sqrMagnitude > 0.0001f
+                    ? -Physics2D.gravity.normalized
+                    : Vector2.up;
+                float rappelTargetAngle = Mathf.Atan2(gravityUp.y, gravityUp.x) * Mathf.Rad2Deg - 90f;
+                float angleError = Mathf.DeltaAngle(headRb.rotation, rappelTargetAngle);
+                float targetAngularVelocity = Mathf.Clamp(angleError * rotationSpeed, -120f, 120f);
+                headRb.angularVelocity = Mathf.Lerp(
+                    headRb.angularVelocity,
+                    targetAngularVelocity,
+                    Mathf.Clamp01(Time.fixedDeltaTime * rotationSpeed)
+                );
+            }
+
             return;
         }
 
@@ -1506,24 +1499,10 @@ public class SpiderControllerIK : MonoBehaviour
         float webHangFactor = 1f;
         if (shooter != null && shooter.IsPlacementMode)
         {
-            if (shooter.IsRappelling)
-            {
-                // Restore some IK authority! If 0, the spider torso acts as a dead ragdoll held entirely by the tether joint. 
-                // At 0.4, the kinematic legs "cause" physics, pulling the torso towards their planted grip on the web, giving "cause and effect"
-                webHangFactor = 0.4f; 
-
-                // Horizontal swing force from input (same as freefall)
-                if (inputDirection.sqrMagnitude > 0.01f)
-                {
-                    Vector2 swingForce = new Vector2(inputDirection.x, 0f) * bodySmoothing * headRb.mass * 0.5f;
-                    headRb.AddForce(swingForce, ForceMode2D.Force);
-                }
-            }
-            else
-            {
-                // Scale down body solver control based on how many legs are on solid ground.
-                webHangFactor = Mathf.Lerp(0.1f, 0.8f, groundFactor);
-            }
+            float webSupport = Mathf.Clamp01(Mathf.Max(groundFactor, strandFactor));
+            webHangFactor = shooter.IsRappelling
+                ? Mathf.Lerp(0.18f, 0.55f, webSupport)
+                : Mathf.Lerp(0.25f, 0.85f, webSupport);
         }
 
         Vector2 gravityCancel = -Physics2D.gravity * headRb.gravityScale;

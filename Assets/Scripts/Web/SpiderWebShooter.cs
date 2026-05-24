@@ -12,7 +12,7 @@ public class SpiderWebShooter : MonoBehaviour
     public int stringId = 0;
     public BoxCollider2D webRb;
     public float maxShootRange = 50f;
-    [Range(0.1f, 1.2f)] public float tensionFactor = 1.01f;
+    [Range(0.1f, 10.0f)] public float tensionFactor = 1.01f;
     public float rappellingWinchSpeed = 18f;
 
     [Header("Verlet Lines")]

@@ -1,13 +1,5 @@
 {
   "dependencies": {
-    "com.bezi.sidekick": {
-      "version": "file:com.bezi.sidekick",
-      "depth": 0,
-      "source": "embedded",
-      "dependencies": {
-        "com.unity.nuget.newtonsoft-json": "3.2.1"
-      }
-    },
     "com.unity.2d.animation": {
       "version": "13.0.4",
       "depth": 1,
@@ -237,17 +229,6 @@
         "com.unity.mathematics": "1.2.1",
         "com.unity.profiling.core": "1.0.0",
         "com.unity.editorcoroutines": "1.0.0"
-      },
-      "url": "https://packages.unity.com"
-    },
-    "com.unity.ml-agents": {
-      "version": "2.0.2",
-      "depth": 0,
-      "source": "registry",
-      "dependencies": {
-        "com.unity.barracuda": "2.0.0",
-        "com.unity.modules.jsonserialize": "1.0.0",
-        "com.unity.modules.imageconversion": "1.0.0"
       },
       "url": "https://packages.unity.com"
     },
